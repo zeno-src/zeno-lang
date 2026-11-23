@@ -19788,3 +19788,471 @@ and end `main` with what `zeno_tests_end` gives back. `main.rs` reads
 fault that fails its test and goes on, which needs a way back from a
 fault that a firmware build does not have; and reading the totals back
 from a board, which needs the board's serial port read by the command.
+
+## 61. Another language's code in a Zeno file: `inline` blocks
+
+Partha asked whether Zeno should be a superset of the big languages,
+so that their code could be pasted into a Zeno program. The answer
+agreed on was no, and this chapter is what is built in its place: a
+block that holds another language's code as it was written, which the
+program calls. [`inline.md`](inline.md) is the walkthrough.
+
+```zeno
+import c
+
+let bits = inline c {
+    #include <stdint.h>
+
+    int ones(uint32_t x) {
+        int count = 0;
+        for (; x != 0; x &= x - 1) {
+            count++;
+        }
+        return count;
+    }
+}
+
+print(bits.ones(0xA5))
+```
+
+Nothing here changes a program that has no block. A block is asked
+for twice, by the word `inline` and by the `import` of its language,
+and `tools/same.py` shows the rest (61.18).
+
+### 61.1 A block, and not a superset
+
+**The rule.** Zeno is not a superset of any language. Code of another
+language goes in a block, is built or run by that language's own
+compiler, and is called through the bridge Zeno already has to it.
+
+**Why not a superset.** A superset has to take every program of the
+other language for ever, with every mistake that language allows, so
+the first thing given up would be the checks Zeno exists for: an
+`int` that cannot overflow quietly, a name that cannot be `none`
+unseen. A superset of two languages cannot exist at all where they
+disagree: `a / b`, `{}`, `'x'` and `x = y` each mean something else
+in C, Python and JavaScript. And a superset of one language makes
+Zeno a dialect of it. TypeScript is JavaScript with types and can
+never fix JavaScript's `==`; C++ carried C's every rule for forty
+years.
+
+**What a block gives in its place.** The same result for the person
+who has code already written: the code is used as it is, today, and
+not rewritten. It costs Zeno one new form and no new meaning: a block
+is a value, and that value is one the language had (a library of C,
+a module of Python or of Node).
+
+| | The way | Verdict |
+|---|---|---|
+| A | Zeno as a superset of C, or of several languages | Turned down, above |
+| B | The other language's code only in its own files, used through `c.library("crc.c", ...)` and `python.module` | Works today, and stays. But ten lines of C want a file, a second list of declarations, and a reader who opens both |
+| C | A block in the `.zeno` file | **Chosen.** The code sits beside the lines that call it |
+| D | A converter that rewrites the code as Zeno | Built next, as `zeno convert`. It cannot take everything, and what it cannot take it leaves in a block, so it needs C first |
+
+### 61.2 How a block is written
+
+**The rule.** `let name = inline c {`, the code on the lines below,
+further in, and a line that holds only `}`. The word after `inline`
+is the language, and is the name of the module its `import` gives.
+
+**Why these words.** `inline` says what is done: the code is in the
+line of the program, and not in a file beside it. C, C++ and Rust
+programmers know the word for assembly written in the middle of C,
+which is the same idea. The language's word is the one the program
+already wrote in its `import`, so there is one name for each language
+and not two (`node`, and not `js` here and `node` there). The braces
+are Zeno's own, as for every other block of the language.
+
+| | Written | Verdict |
+|---|---|---|
+| A | `let bits = inline c { ... }` | **Chosen** |
+| B | `c { ... }` or `c.inline { ... }` | A name and a `{` begins nothing else in Zeno, and `c` may be a variable. The reader could not tell a block from a mistake |
+| C | `c.code("""...""")`, a text given to a function | The text would be Zeno's: its `\n` and `{x}` would be read by Zeno first, and C's `"\n"` has to be written `"\\n"`. Pasted code would have to be edited, which is what a block is for avoiding |
+| D | `extern "C" { ... }`, as C++ and Rust write it | There it declares what is elsewhere. Here the code is the thing itself |
+| E | `@c` on the line above, or a comment that does something | A mark that changes what the next lines are is easy to miss, and a comment that runs is a rule nobody can see (60.1, D) |
+| F | Text between three backticks, as in a page of Markdown | Nothing else in Zeno is written so, and a block has no name to be called through |
+
+### 61.3 Where a block ends, and why Zeno does not read inside it
+
+**The rule.** The first line ends with the `{`. Every line of the
+block is further in than that first line. The block ends at a line
+that holds only `}`, as far in as the first line. What is between is
+not read as Zeno at all.
+
+**Why indentation ends it.** To find the `}` that closes a block by
+counting braces, Zeno would have to know what a brace inside a string
+or a comment looks like in each language: `"}"`, `'}'`, `/* } */`,
+`// }`, `# }`, a template of JavaScript between backticks with
+`${...}` inside it, a regular expression `/}/`, a raw string of
+Python. That is a small lexer for each language, each wrong somewhere,
+and the mistake it makes is the worst kind: the block ends early and
+the rest of the other language's code is read as Zeno, with messages
+about lines that are fine.
+
+A line that holds only `}` at the first line's own indentation can be
+found with no knowledge of the other language. Code in a block is
+indented anyway, so a `}` of the other language is always further in.
+The rule can be said in one sentence and seen with the eye.
+
+| | How the end is found | Verdict |
+|---|---|---|
+| A | A line holding only `}`, as far in as the opening line | **Chosen** |
+| B | Counting `{` and `}` | Wrong for a brace in a string or a comment, above |
+| C | Counting them with a lexer for each language | Three lexers to keep right, and a fourth for each language added |
+| D | A word the writer picks, as a shell's `<<END` | Never wrong, but a new form for the reader, and the writer has to pick a word |
+| E | Indentation alone, with no `}` | Zeno's blocks end with `}`. One that did not would be the only one |
+
+**A line that is not further in is a mistake**, and is not taken for
+the end: "this line of the `inline c` block is not further in than
+the line that opens the block. Everything in the block is indented,
+and the block ends at a line that holds only `}`, as far in as the
+line that opened it". An empty line is allowed anywhere. A block with
+no such closing line is refused with "this `inline c` block has no
+end...", at the line that opened it.
+
+**This is the one place where indentation means something in Zeno.**
+It was weighed against "the entire language must be unambiguous": the
+rule has one reading, a mistake against it is refused and not
+guessed at, and `zeno format` keeps to it. The other ways each have a
+case that reads two ways.
+
+### 61.4 `inline` is not a reserved word
+
+**The rule.** `inline` begins a block only where it is followed by a
+name, a `{`, and the end of the line. Everywhere else it is a name,
+as before: `let inline = 3` means what it meant.
+
+**Why.** A reserved word is taken from every program that used it as
+a name, and 0.9.0 is not allowed to change what a program of 0.8.0
+means. A name, another name and `{` at the end of a line is nothing
+in Zeno today (two names side by side are always refused), so no
+program that was accepted can be read otherwise now. That is the test
+of 11.6.
+
+The lexer looks ahead to the end of the line to decide. It is the one
+place it looks further than two characters, and it has to be the
+lexer: what follows is not made of Zeno's tokens.
+
+### 61.5 A block is the whole value of a `let`
+
+**The rule.** `let name = inline c {`. Not `var`, not `const`, not an
+argument, not part of a larger expression. It may be at the top of a
+file, in a function, or in a test.
+
+**Why a `let`.** What a block gives never changes, so `var` would
+promise something that cannot happen, and is refused with "an
+`inline` block is the value of a `let`. What it gives never changes".
+A `const` is a value known when the program is checked, which a
+module of Python is not.
+
+**Why the whole value.** `print(inline c {` ... `}.f(1))` would put
+many lines of another language in the middle of a line of Zeno, with
+the end of the Zeno line after the block's `}`, and rule 61.3 could
+not hold. With a name, the block is in one place and its uses in
+another, each readable alone.
+
+**Why in a function too.** A helper used by one function reads best
+there. The block is still made once: under `zeno run` the first time
+the line is reached, and in a build it is part of the program's C
+wherever it was written.
+
+### 61.6 Which languages have a block
+
+**The rule.** `inline c`, `inline python`, `inline node`. Any other
+word is refused with a message that names the three and says what to
+do in its place.
+
+| Language | Verdict | Why |
+|---|---|---|
+| C | **A block** | The most code already written, and all of a board's. It is also what `zeno build` writes, so a block of C costs a built program nothing |
+| Python | **A block** | The most used language, with a library for everything. Zeno is not for firmware only |
+| JavaScript, through Node | **A block** | The same, and the code of every web page |
+| Assembly | No block of its own: inside a block of C (61.15) | It has no types, and it is a different language on every processor |
+| C++ | No block | A built program is one file of C given to one C compiler (44.12). A block of C++ would need a second compiler in every build, and a way across for classes, templates and exceptions, which C does not have. C++ with `extern "C"` goes to `c.library` |
+| Rust, Go | No block | Neither can be built from ten lines: each wants a project, its own build tool and minutes. Their libraries are used through `import c` (44.6) |
+| Java | No block | A class needs `javac` and a file named after it. `import java` uses a jar |
+| TypeScript | No block | Node does not run it everywhere yet. Its JavaScript is what `inline node` takes |
+| Ruby, PHP, Lua, C# | Later | Each has its `import` already (chapters 37 to 40), and a block is the same few lines for each. Left until someone asks, since each is a language to test on three systems |
+
+**Why `inline node` and not `inline js`.** The block is a module of
+Node, with `require` and `exports`, and runs in the Node that
+`import node` starts. `js` would promise a browser's JavaScript too.
+`inline js`, `inline javascript`, `inline py` and `inline asm` are
+each answered by name.
+
+### 61.7 A block needs the `import` of its language
+
+**The rule.** A file with `inline c` and no `import c` is refused:
+"an `inline c` block needs `import c` at the top of the file. The
+import is what asks for the other language, and a file with no such
+line uses none".
+
+**Why.** The first lines of a file say everything it needs from
+outside Zeno. A reader who sees no `import python` there knows the
+file runs with no Python on the machine, and that has been true since
+the first bridge (26.11). A block that brought the language in by
+itself, from line 200, would end that. It is also the opt-in rule of
+this project: a feature is asked for by a word the program writes,
+and here by two.
+
+### 61.8 What a block of C gives
+
+**The rule.** A library of C, the type `c.library` gives. Its
+functions are the ones written out in the block, with a body, that
+are not `static`. Each is typed from its own first line. Everything
+else in the block is the block's own: a `static` function, a
+variable, a `#define`, a `typedef`, a `struct`.
+
+**Why the same type.** Everything chapter 44 decided then holds with
+nothing said twice: how a number is checked to fit, how a list is
+lent for a pointer, what a `const` means, what is refused. There is
+one table of how values go across, in [`c.md`](c.md), and a reader
+who knows `c.library` knows a block.
+
+**Why nothing is declared.** `c.library` is given declarations
+because a library that is already built says nothing about its
+functions. A block has the functions themselves, and their first
+lines are the declarations. Asking for them again would be the same
+words twice, and the second copy would one day disagree with the
+first.
+
+**Why `static` is the way to keep a function to the block.** It is
+what C itself means by the word: a function no other file can see.
+Nothing new is learned, and code pasted from a `.c` file that was
+written well already says it.
+
+| | Which functions Zeno sees | Verdict |
+|---|---|---|
+| A | Every function with a body that is not `static` | **Chosen** |
+| B | Only those listed after the block, or marked with a comment | A second list to keep right |
+| C | Every function, `static` or not | A helper that takes a struct by value would refuse the whole block |
+
+**A function Zeno cannot call that is not `static` is refused**, with
+the reason `c.library` gives and one more sentence: "In an `inline c`
+block, a function that only the block calls is marked `static`, and
+Zeno leaves it alone". It is not passed over quietly: a function
+that is there and cannot be called would be found only at the call,
+with a worse message. A block with nothing to call is refused with
+"this `inline c` block has no function that Zeno can call...".
+
+**How the functions are found.** `bridge_c::block_declarations` goes
+through the block once at the level of C's top: it steps over
+comments, strings, lines that begin with `#`, and bodies between
+braces, and keeps the first line of each function, the `typedef`s and
+the `struct`s. What it keeps is given to the reader of declarations
+that `c.library` has, so both are read by one piece of code. Unlike
+61.3, this reads C, and has to: but a mistake here cannot move the
+end of the block. The worst it can do is refuse a block or miss a
+function, and both are said in a message.
+
+### 61.9 What `zeno run` does with a block of C
+
+**The rule.** The block is built once into a small library by the C
+compiler of the machine, kept in the folder for what can be made
+again, and called through the helper that `import c` uses. It is
+built again when its text changes. `zeno run --vm` and `zeno test` do
+the same.
+
+**Why through the helper.** It is what `c.library("crc.c", ...)`
+does, and it keeps the other language's mistakes out of `zeno`: a
+block that writes through a bad pointer stops the helper, and Zeno
+says "C stopped while Zeno was waiting for its answer" at the call
+(44.4). Building the block into `zeno` itself would be faster for
+each call and would let a block damage the interpreter.
+
+### 61.10 What `zeno build` does with a block of C
+
+**The rule.** Every build that writes C writes the block into the
+program's C, as it was written, after the runtime and before the
+program's own functions. A call of one of its functions is a call of
+C in the same file. Before the block is `#line N "file.zeno"`, and
+after it `#line K "program.c"`.
+
+**Why in the same file.** It is the least there can be: no library
+beside the program, no second step of building, nothing between the
+call and the function, and the C compiler may put a small function in
+line. For firmware that is the whole point: a few instructions that
+must be C or assembly, on the board, with no cost.
+
+**Why `#line`.** A mistake in the block is found by the C compiler
+when the program is built. Without the mark it would name a line of
+the program's C, five thousand lines down a file the writer never
+opened. With it, the message names the line of the `.zeno` file, and
+so does a debugger. The second `#line` gives the lines after the
+block back to the C file.
+
+**What a block can clash with.** The block is in one file with the
+runtime and the program, so a name of the block could be one of
+theirs. Zeno's own names begin with `zeno_` or `z_`, and the C
+compiler refuses a clash with a message that names both lines. A
+block can use the headers it includes, and those the runtime included
+before it.
+
+**All of them.** `zeno build`, `--firmware`, `--no-collector`,
+`--owned`, `--minimal`, `--release`, `--fast`, `--board`, and
+`zeno test --build`. `examples/bits.zeno` prints the same from each.
+
+### 61.11 What refuses a block
+
+**The rule.** Where a block cannot work, it is an error with the line
+of the block. A block is never skipped.
+
+| | `inline c` | `inline python`, `inline node` |
+|---|---|---|
+| `zeno build`, and every build that writes C | built in | refused: a built program is C, and has no Python or Node inside it |
+| `zeno check --strict` | checked | refused: what the block gives is known only when the program runs |
+| `zeno build --llvm` | refused | refused |
+| `zeno build --target ...` | refused | refused |
+| The playground | refused | refused |
+
+**Why refused and not left out.** A program that built with its block
+missing would fail at the first call, or worse, build to something
+that does something else. Each of these already refuses the `import`
+(44.8, 26.11), so a block there was refused before it was read; the
+messages for the block itself are for the cases the import passes.
+
+**`--llvm`.** The LLVM build writes IR, and C cannot be pasted into
+IR. It could compile the block with clang and link the two; that is
+left for later with the rest of `import c` under `--llvm` (44.10).
+
+### 61.12 A block that cannot be started stops the program
+
+**The rule.** A block of C that does not compile, or a block of
+Python or JavaScript with a mistake that stops it from starting, ends
+the program with what the other language said. No `try` catches it,
+and a function with a block in it needs no `raises`.
+
+**Why not an error to catch.** An error that can be caught is for
+what may go differently next time: a file that is not there, a text
+that is not a number. A block that does not compile will not compile
+next time either. It is a mistake in the program, as a misspelt word
+of Zeno is, and those are never caught. If it were an error, every
+function with a block would need `raises`, to name something its
+caller can do nothing about.
+
+**When it is found.** In a build, when the program is built. Under
+`zeno run`, when the line of the block is reached, and not before:
+`zeno check` does not start a C compiler or Python, and stays as
+quick as it was. What `zeno check` does find, for C, is everything
+about the calls: a function that is not there, an argument of the
+wrong type, too few arguments.
+
+### 61.13 A block of Python is a module
+
+**The rule.** The block gives a module of Python: what `python.module`
+would give if the lines were a `.py` file. It runs once, top to
+bottom, when the program reaches it. An error in it names the
+`.zeno` file and the line there.
+
+**How.** `inline.rs` makes an empty module with Python's own
+`types.ModuleType`, compiles the text with `compile`, and runs it in
+the module with `exec`. The text is given as many empty lines in
+front as the `.zeno` file has above the block, and the file's own
+path, so the line numbers Python counts are the file's. Nothing was
+added to the helper of chapter 26: a block is made with the calls a
+Zeno program could have written itself.
+
+**Why the shared indentation is taken off.** Python reads
+indentation, and a block is indented because it is in a block. The
+indentation every line shares is the block's and not the program's
+(61.16); each line keeps how far in it is from the others.
+
+### 61.14 A block of JavaScript is a module of Node
+
+**The rule.** The block gives what it puts in `exports`, or gives
+`module.exports`. It is a module as a `.js` file is: it has
+`require`, which finds packages from the folder of the `.zeno` file,
+and `__filename`.
+
+**Why a module of the older kind.** Node makes one from a text with
+one call. A module with `import` and `export` can only be made from a
+file or an address, and what it exports is given later, through a
+promise. The older kind is what `require` gives, which is what
+`node.module` uses (chapter 28). A block that writes `import` is told so by
+Node.
+
+### 61.15 Assembly
+
+**The rule.** There is no `inline asm`. Assembly is written inside a
+block of C, as the C compiler takes it, and a whole file of assembly
+is given to `c.library` beside the `.c` files (`.s`, and `.S` for one
+with `#include` lines).
+
+**Why no block of its own.** A block gives functions, and a function
+needs types for what it takes and gives. Assembly has none, so each
+routine would need a declaration of C written beside it anyway; with
+the assembly inside a C function, the function is the declaration.
+Assembly is also not one language. Each processor has its own
+instructions, and GCC, Clang, IAR and Keil each write them their own
+way. The C compiler of the board already knows both, and Zeno would
+have to learn them.
+
+**What it costs.** One line more than a block of its own would: the
+C function's first line. It gains the registers the compiler picks
+for the arguments, and `static inline` if the writer wants it.
+
+### 61.16 The indentation a block's lines share is not part of it
+
+**The rule.** The spaces that every line of a block begins with are
+taken off before the other language is given the text. A line the C
+compiler names is the line of the `.zeno` file. A column it names is
+counted from where the block's lines begin.
+
+**Why.** For Python the rule has no choice (61.13). For C and
+JavaScript the other way was weighed: giving C the lines as they are
+in the file, spaces and all, so that columns are the file's too. But
+then a text of C that runs over a line with `\`, or a template of
+JavaScript over several lines, would have the block's indentation
+inside it, and would change when `zeno format` moved the block. A
+column that is four less is seen at once, since the compiler shows
+the line; a text with four spaces more in it is not. One rule for
+three languages is also easier to say than one and an exception.
+
+### 61.17 The formatter
+
+**The rule.** `zeno format` leaves every line of a block as it was,
+and moves the block as one piece: its lines begin one step in from
+the line that opens it, and its `}` is under that line.
+
+**Why.** The formatter lays out Zeno, and the text of a block is not
+Zeno. It can only move the block with its line, and it must, or a
+block in a function that was itself moved in would break rule 61.3.
+
+### 61.18 Nothing changes for a program with no block
+
+`tools/same.py` built the 481 programs it had before this chapter
+(every example, every program of `tools/targets/`, every sample of
+the book that runs, the benchmarks) fifteen ways each with 0.8.0 and
+with this compiler: 7215 builds, the same to the byte. The two new
+examples are the only programs that differ, and 0.8.0 refuses both.
+
+`inline` is still a name (61.4), no module was added, and nothing of
+the runtime was touched.
+
+### 61.19 Left for later
+
+- **A library for a block of C**: a block that needs `-lz` has nowhere
+  to say so, and goes in a `.c` file given to `c.library` until it
+  has.
+- **A constant of a block**: a `#define` or a variable is not seen by
+  Zeno. `c.library` can declare a value (44.11).
+- **Blocks of Ruby, PHP, Lua and C#** (61.6).
+- **`zeno build --llvm`** with a block of C (61.11).
+- **Colours inside a block in the editor**: the VS Code and Vim
+  files colour a block as its language where the editor has that
+  language; the playground does not.
+- What `c.library` leaves for later is left here too: a function of
+  Zeno given to C, a struct by value, small types given back as
+  themselves.
+
+**How it is built.** `token.rs`: `TokenKind::Inline` holds the
+language and the text. `lexer.rs`, `inline_block`: decides (61.4),
+reads the lines (61.3), takes off the shared indentation (61.16).
+`parser.rs`: `ExprKind::Inline`, only as the value of a `let`.
+`checker.rs`, `inline`: the import (61.7), and for C the library, by
+`bridge_c::library_of_block`. `bridge_c.rs`: `block_declarations`
+(61.8), and `Block`, which says where a block was written and writes
+its `#line`s. `inline.rs`: what `zeno run` does (61.9, 61.12 to
+61.14). `emit_c.rs`: `c_libraries` writes the block and
+`with_blocks_placed` its line numbers (61.10). `emit_llvm.rs` and
+`lower.rs` refuse (61.11). `format.rs`, `block` (61.17).

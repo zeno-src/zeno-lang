@@ -28,6 +28,10 @@ Python, JavaScript and Java ([`python.md`](python.md),
 Nothing changes for a program that does not say `import c`. The
 decisions behind it are chapter 44 of [`decisions.md`](decisions.md).
 
+A few functions of C can also be written in the `.zeno` file itself,
+in an `inline c` block, which gives the same kind of library with
+nothing declared: [`inline.md`](inline.md).
+
 ## What it needs
 
 A C compiler: `cc`, `gcc` or `clang`, the first that is installed, or
@@ -49,6 +53,7 @@ The first thing given is one text, or a list of them:
 |------------------|--------------------------------------------------------------------|
 | `"z"`            | A library of the system, by its name: `-lz`, as C is built with it  |
 | `"crc.c"`        | A file of C, built with the rest                                   |
+| `"startup.s"`    | A file of assembly, which the C compiler assembles (`.s`, `.S`)    |
 | `"libtemp.so"`   | A library that was built already: `.so`, `.a`, `.o`, `.dylib`, `.dll` |
 | `"-DSTEP=3"`     | Anything that starts with `-` goes to the compiler as it is        |
 | `none`           | Nothing more: for the C library every program has (`strlen`, `abs`) |
