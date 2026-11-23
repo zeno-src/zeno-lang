@@ -52,12 +52,12 @@ writes the type of Zeno that gives the same sums:
 \toprule
 C & Zeno \\
 \midrule
-\verb|uint8_t|, \verb|uint16_t|, \verb|uint32_t| & \verb|u8|, \verb|u16|,
-  \verb|u32|, with \verb|wrap| where C goes round \\
+\verb|uint8_t| to \verb|uint64_t| & \verb|u8| to \verb|u64|, with
+  \verb|wrap| where C goes round \\
 \verb|char|, \verb|short|, \verb|int|, \verb|long| & \verb|int|, and a
   store into a smaller type is checked \\
-\verb|size_t|, \verb|uint64_t| & \verb|int|, where the value is never
-  below zero; else kept \\
+\verb|size_t| & \verb|int|, where the value is never below zero;
+  else kept \\
 \verb|float|, \verb|double| & \verb|f32|, \verb|float| \\
 \verb|char *| holding a text & \verb|str| \\
 \verb|struct| & a class \\
@@ -73,11 +73,18 @@ numbers that may be below zero go through \verb|c_divide| and
 \verb|c_remainder|, which take the quotient toward zero; when both
 sides are never below zero they are \verb|//| and \verb|%|.
 
+A hash of 64 bits reads as it does in C:
+
+\begin{zenofrag}
+hash ^= u64(u8(letter_code(text, i)))
+hash = u64.wrap(hash * FNV_PRIME)
+\end{zenofrag}
+
 \begin{note}
-A \verb|uint64_t| is written as an \verb|int|, so a sum past
-$2^{63}$ stops the program where C goes on to $2^{64}$ and round.
-That is loud, never wrong; but a hash of 64 bits stops where C's goes
-on, and is better left in the block for now.
+A \verb|size_t| is an \verb|int|: it counts bytes and items, and
+stands beside \verb|int|s on nearly every line. It is never past
+$2^{63}$; if it were, Zeno would stop with \verb|OverflowError| where C
+goes on.
 \end{note}
 
 \section{Structs and pointers}
