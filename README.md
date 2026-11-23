@@ -115,7 +115,7 @@ piece of the compiler:
 | Microcontrollers and firmware | Compile to C, no heap required |
 | Command-line tools, desktop, servers | Native code through C or LLVM |
 | Calling existing C libraries | C interop, in both directions |
-| Using the libraries of other languages | `import python` starts the Python that is installed beside the program, and any package of it is used as it is ([`docs/python.md`](docs/python.md)). `import node` does the same for JavaScript: the library of Node and the packages of npm ([`docs/node.md`](docs/node.md)). `import java` does it for Java: its own classes and any jar ([`docs/java.md`](docs/java.md)). `import ruby` does it for Ruby: its own library and any gem ([`docs/ruby.md`](docs/ruby.md)). `import php` does it for PHP: its own functions and classes and any Composer package ([`docs/php.md`](docs/php.md)). `import lua` does it for Lua: its own library and any module of LuaRocks ([`docs/lua.md`](docs/lua.md)). `import csharp` does it for C# and .NET: its own types and any package of NuGet ([`docs/csharp.md`](docs/csharp.md)). `import c` calls a library of C, or of Go or Rust built with their C interface, from the declarations of the functions the program uses ([`docs/c.md`](docs/c.md)). A few lines of C, Python or JavaScript can be written in the `.zeno` file itself, in an `inline` block ([`docs/inline.md`](docs/inline.md)) |
+| Using the libraries of other languages | `import python` starts the Python that is installed beside the program, and any package of it is used as it is ([`docs/python.md`](docs/python.md)). `import node` does the same for JavaScript: the library of Node and the packages of npm ([`docs/node.md`](docs/node.md)). `import java` does it for Java: its own classes and any jar ([`docs/java.md`](docs/java.md)). `import ruby` does it for Ruby: its own library and any gem ([`docs/ruby.md`](docs/ruby.md)). `import php` does it for PHP: its own functions and classes and any Composer package ([`docs/php.md`](docs/php.md)). `import lua` does it for Lua: its own library and any module of LuaRocks ([`docs/lua.md`](docs/lua.md)). `import csharp` does it for C# and .NET: its own types and any package of NuGet ([`docs/csharp.md`](docs/csharp.md)). `import c` calls a library of C, or of Go or Rust built with their C interface, from the declarations of the functions the program uses ([`docs/c.md`](docs/c.md)). A few lines of C, Python or JavaScript can be written in the `.zeno` file itself, in an `inline` block ([`docs/inline.md`](docs/inline.md)). A whole file of Python can be written again as Zeno with `zeno convert`, which keeps what it cannot rewrite in such a block, so that what it writes always runs ([`docs/convert.md`](docs/convert.md)) |
 | Web front ends | Zeno itself built for WebAssembly, and the `web` module (`zeno build --web`); the program compiled to JavaScript (`--target js`, `--target html`) |
 | Web back ends, networking | `async` / `await` and a standard library |
 | Data and numerics | Fast arrays and operator overloading |
@@ -400,7 +400,7 @@ written for bytes by hand ([`docs/generics.md`](docs/generics.md)).
   [`docs/python.md`](docs/python.md), [`docs/node.md`](docs/node.md),
   [`docs/java.md`](docs/java.md), [`docs/ruby.md`](docs/ruby.md),
   [`docs/php.md`](docs/php.md), [`docs/lua.md`](docs/lua.md), [`docs/csharp.md`](docs/csharp.md),
-  [`docs/c.md`](docs/c.md), [`docs/inline.md`](docs/inline.md),
+  [`docs/c.md`](docs/c.md), [`docs/inline.md`](docs/inline.md), [`docs/convert.md`](docs/convert.md),
   [`docs/math.md`](docs/math.md), [`docs/dict.md`](docs/dict.md),
   [`docs/modules.md`](docs/modules.md), [`docs/using-packages.md`](docs/using-packages.md),
   [`docs/registry.md`](docs/registry.md), [`docs/packages.md`](docs/packages.md),
@@ -964,6 +964,7 @@ src/registry.rs     the registry: a package by its name, `zeno search`, `zeno pu
 src/format.rs       `zeno format`: one layout for every file
 src/json.rs         reads and writes JSON, for the language server and the `json` module
 src/lsp.rs          `zeno lsp`: the language server an editor starts
+src/convert*.rs     `zeno convert`: a file of Python written again as Zeno
 editors/            colours and setup for VS Code, Vim, Neovim and Helix
 src/checker.rs      finds type mistakes before the program runs
 src/value.rs        what a value is while a program runs

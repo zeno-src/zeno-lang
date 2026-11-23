@@ -74,9 +74,9 @@ a superset of the big languages, and is built for 0.9.0: an `inline
 c`, `inline python` or `inline node` block ([`inline.md`](inline.md),
 chapter 61). A block of C is part of the program's C in every build
 that writes C, firmware included. What it leaves for later is at the
-end of that page. `zeno convert`, which rewrites a file of another
-language as Zeno and keeps what it cannot read in a block, comes
-after it.
+end of that page. `zeno convert` rewrites a file of Python as Zeno
+and keeps what it cannot read in a block ([`convert.md`](convert.md),
+chapter 62); C is the next language it is to read.
 
 ## 1. On a board
 

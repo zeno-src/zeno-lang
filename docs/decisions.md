@@ -20256,3 +20256,322 @@ its `#line`s. `inline.rs`: what `zeno run` does (61.9, 61.12 to
 61.14). `emit_c.rs`: `c_libraries` writes the block and
 `with_blocks_placed` its line numbers (61.10). `emit_llvm.rs` and
 `lower.rs` refuse (61.11). `format.rs`, `block` (61.17).
+
+## 62. A file of Python written again as Zeno: `zeno convert`
+
+Partha asked for converters that write another language's code as
+Zeno, with Python first and then C, as the second half of what chapter
+61 began: a block holds code as it was written, and a converter
+rewrites it. [`convert.md`](convert.md) is the walkthrough.
+
+```sh
+zeno convert shop.py       # writes shop.zeno, and says what it did
+```
+
+Nothing here changes what any other command does. `convert` is a new
+command, and a program of Zeno is compiled as it was (62.20).
+
+### 62.1 One promise: never silently wrong
+
+**The rule.** What the converter writes runs, and prints what the
+Python printed, but for what a `# convert:` comment says. What it
+cannot write so, it does not write: it keeps that piece as Python.
+
+**Why.** A converter that writes most of a program well and a few lines
+wrongly is worse than none. The person who reads its Zeno trusts it,
+and a wrong line found a month later costs more than the whole
+conversion saved. With the block of chapter 61, the converter never
+has to guess: there is always a way to write what it cannot read,
+which is to leave it as it was.
+
+| | The way | Verdict |
+|---|---|---|
+| A | Write everything, as well as it can be guessed, and mark the guesses | Turned down: a mark that is not read is a wrong program |
+| B | Refuse a file with anything it cannot read | Turned down: nearly every real file has one line it cannot read |
+| C | Write what is sure, keep the rest in an `inline python` block that the Zeno calls | **Chosen** |
+
+### 62.2 Inside `zeno`, written by hand
+
+**The rule.** `zeno convert` is part of the `zeno` program. It reads
+Python with a reader of its own (`convert_python.rs`), with no library
+and no Python.
+
+**Why.** Zeno has no dependencies (5.1, 5.2), and a converter that
+needed Python's own `ast` module would need a Python of the right
+version to convert, where the result needs one only for what is kept.
+A reader of its own also knows exactly what it read: a construct it
+does not know is a piece it keeps, with that as the reason, and not an
+error deep in a tree it did not make.
+
+**Not chosen.** A separate program, or a repository of its own: the
+converter writes what Zeno's checker must take, and is checked by it
+in the same process (62.9), so it belongs with the checker.
+
+### 62.3 Pieces: the statements at the left margin
+
+**The rule.** The file is cut into pieces, each a statement that begins
+at the left margin with all that belongs to it. Each piece is written
+as Zeno, or as Zeno with a note, or kept whole.
+
+**Why.** A piece is what a reader of Python sees as one thing: a
+function, a class, a loop, a line. Keeping one whole keeps its meaning,
+since nothing inside it is changed. A finer cut (one statement of a
+function in Zeno and the next in Python) would need the two sides to
+share the function's local variables, which they cannot.
+
+### 62.4 What is kept goes into one block, in the place it ran
+
+**The rule.** One `inline python` block, named `py` (or `kept`, ...
+if the file has that name). A kept `import`, `def` or `class` goes at
+the top of it and the Zeno reaches it as `py.name`. A kept piece that
+does something becomes `def convert_step_N():` with `global` for what
+it gives a value, and the Zeno calls `py.convert_step_N()` where the
+piece was. `if __name__ == "__main__":` in kept text is `if True:`.
+
+**Why.** A program's lines run in order, and a kept loop must run
+between the lines of Zeno above and below it. A function of the block,
+called there, does exactly that. One block, and not one for each
+piece, because the kept pieces share their names, as they did in the
+file.
+
+### 62.5 Types from the program itself
+
+**The rule.** The converter learns each type from what the program
+does: what a function is given at its calls, what it gives back, what
+goes into a list, a dict, a field. It goes over the whole file in
+rounds until a round learns nothing new, twelve at most. In the last
+round a type still not known is a reason to keep the piece.
+
+**Why.** Most Python has no types written. A function's parameters
+are known from its calls, and those may be further down the file, and
+a list's items from an `append` in another function, so one pass in
+order cannot know them. A type written in the Python (`-> int`, `x:
+float`) is used where there is one, and checked against what the
+program does.
+
+**What a variable of Zeno needs.** One type. A name that holds a whole
+number and later a float is a float from its first value, with a note
+(62.10); a name that holds a text and a number is kept.
+
+### 62.6 What crosses between the two sides
+
+**The rule.** A number, a text, a bool and `none` cross to the block
+and back. A value of Python's own stays in Python, and Zeno holds it
+as a handle. A list or a dict of Zeno goes to Python only if it is
+written out in the call, held by nothing else.
+
+**Why.** The bridge copies a list of Zeno into Python (`python.md`).
+A copy of a list that the Zeno holds would not show what Python did to
+it, and a later line of Zeno would read the old one. A list written in
+the call has no other holder, so its copy is as good as it.
+
+### 62.7 What a kept piece needs is kept with it
+
+**The rule.** A piece that gives a value to a name a kept piece reads
+is kept too, if the kept piece can run after it: it is further down
+the file, or it is a function or a class, which run when called. A
+piece that gives a value to a name that a kept function or class
+defines is kept too, and so is one that gives a value to a name a kept
+piece gives one, if a function of Zeno reads that name. An `import` of
+a module Zeno has words for, and a name given one fixed value once in
+the file, are written on both sides.
+
+**Why.** Python can only call Python, and a variable lives on one
+side. The order matters: a kept piece above a line of Zeno can never
+read what that line gives, so it does not pull the line into Python.
+Without that, one kept line near the end of a long file used to pull
+in every piece above it that shared a name with it.
+
+### 62.8 A name both sides give values
+
+**The rule.** Where a kept piece and a piece of Zeno both give values
+to a name, it is a variable on each side. The plan of the file checks
+that every line of Zeno that reads the name after the kept piece reads
+a value Zeno gave it after the kept piece, for certain: a line above
+it in the same block or further out. A `try` whose every `except`
+leaves (`continue`, `return`, `raise`, `break`) and reads nothing the
+`try` gives counts as run whole. A line that may read the kept value
+is kept, with "may still hold here the value that the piece at line N
+gave it".
+
+**The variable of a kept loop.** A kept `for` whose variable is read
+only inside the loop, and by no function, has that variable for its
+own, as a `for` of Zeno does. A loop of Zeno elsewhere with the same
+name has nothing to do with it.
+
+**Why.** Two loops with a variable `name`, one kept, are the usual
+case in a real file, and are not one variable in any sense the program
+uses. The check is what makes it safe to say so.
+
+### 62.9 One piece kept at a time, and Zeno's checker has the last word
+
+**The rule.** When some pieces cannot be written, one is kept: the
+first whose reason is its own and not "the type is not known". Then
+everything is done again. When every piece is written, the whole file
+is read by Zeno's own lexer, parser and checker, in the same process;
+a piece whose lines it refuses is kept, with the checker's message as
+the reason. If a refused line belongs to no piece, the whole file is
+kept as one block.
+
+**Why one at a time.** What one piece cannot be written for is often
+what another became: a name holds a function because the line that
+gives it one is a `lambda`, and that line is kept; a type is not known
+because a value came from the block. Keeping every failing piece at
+once kept pieces for a reason that was gone a moment later. The rounds
+are fast, and a file of 250 lines with a dozen kept pieces converts in
+well under a second.
+
+**Why the checker.** The converter writes text, and Zeno's checker is
+the only thing that knows for certain what Zeno takes. Nothing it
+refuses is given out.
+
+### 62.10 Notes, once for each kind
+
+**The rule.** Where Zeno runs the line and does what the Python did
+but prints or raises a little otherwise, a `# convert:` comment says
+so, above the first line of that kind. The report lists every line of
+every kind. The kinds: a value shown Zeno's way; a very large or very
+small float written otherwise; an error message in Zeno's words; an
+`except` that also catches what only Zeno raises; `upper` and `lower`
+on a to z only; `math.round` and a half; a variable that is a float
+from its first value.
+
+**Why once.** A comment on every `print` of a list would bury the
+program. The report has every line for the person who wants them.
+
+**Why these are notes and not kept.** Each is a difference a person
+expects of a new language and can see at once, and none changes what
+the program computes. Keeping every `print` of a list as Python would
+keep most programs whole.
+
+### 62.11 What Python has and Zeno has not, written once as Zeno
+
+**The rule.** `sorted`, `list.remove`, `split` with a number and a
+text times a number become calls of small functions of Zeno, written
+once at the top of a file that uses them, each with a comment: `sorted`,
+`remove_item`, `split_at_most`, `repeated`. A file that has a name the
+same as one keeps the line that would need it.
+
+**Why.** Each is short in Python and has no one word in Zeno, and each
+is common. A function with its comment says plainly what is done, and
+the person can replace it. `sorted` is generic over `Ordered`, so one
+function serves lists of numbers and of texts.
+
+**Not chosen.** Adding these to Zeno's library. That is a change to
+the language, and decision 6.1 says Zeno gets a method only where it
+cannot say the thing in one short expression already. It may come
+later; the converter does not decide it.
+
+### 62.12 Where each name is declared
+
+**The rule.** A name is declared with `let` (given once) or `var` where
+it gets its first value, if every use is in that block or further in.
+Otherwise it is declared before the outermost statement that holds all
+its uses, outside every loop, with the first value of its type (`0`,
+`""`, `[]`, `none`).
+
+**Why.** Python has one set of names for a whole function; Zeno has
+one for each block. The first value is never read by a program Python
+would run to the end, since Python would stop there with `NameError`
+(62.18).
+
+### 62.13 A parameter given a new value
+
+**The rule.** `def f(n): n = n + 1` is `function f(n_given: int)` with
+`var n = n_given` as its first line; a call that names it says
+`n_given=`.
+
+**Why.** A parameter of Zeno cannot change, and cannot be shadowed in
+the function's first block. The other name is the smallest change that
+keeps every line of the body as it was.
+
+### 62.14 A loop's variable read after the loop
+
+**The rule.** Where a `for` variable is read after the loop, given a
+value inside it, or is a plain variable as well, the loop of Zeno
+counts with `word_item` and its first line is `word = word_item`. The
+name is then planned as the plain variable it is.
+
+**Why.** A `for` of Zeno has its variable to itself, and it is gone
+after the loop; in Python it stays. `for line in lines: ...` then
+`print(line)` is common.
+
+### 62.15 Parts of texts and lists cut as Python cuts them
+
+**The rule.** `xs[a:b]` is `xs.slice(min(a, len(xs)), min(b,
+len(xs)))`, a negative literal end counts from the end and stops at
+0, and the list must be a plain name or field so that it is worked out
+once.
+
+**Why.** Python gives what there is of a part past the end; Zeno's
+`slice` raises `IndexError`. Clamping is what Python does, written out.
+
+### 62.16 A question asked out
+
+**The rule.** `if x:` is written as the question Python asks of that
+type: `x != 0`, `x != ""`, `len(x) > 0`, `x is not none`. `and` and
+`or` are values only between bools.
+
+**Why.** Zeno has no truth of a number or a list (2.4), and
+Python's `a or b` gives one of the two values, where Zeno's gives a
+bool.
+
+### 62.17 A loop that changes what it goes over is kept
+
+**The rule.** A `for` whose block may change the list or dict it goes
+over is kept, and so is one whose block calls a function of the file
+that may change it, by its name or a field of that name.
+
+**Why.** A `for` of Zeno takes its items when it begins; Python takes
+each as it comes to it. The two agree as long as nothing changes the
+list.
+
+### 62.18 What is not promised
+
+A program Python stops with `NameError` or `UnboundLocalError`; whole
+numbers past 64 bits (loud in Zeno, but `int()` of a huge float gives
+Zeno's largest); what a kept function's annotation says it gives; one
+list under two names while a loop goes over one; `strip` and `split`
+on spaces outside ASCII; when a kept `import` runs; the last digit of
+`sin`. Each is in `convert.md`. Each is rare, and each but the first
+two would need the converter to run the program to know.
+
+### 62.19 How it is checked
+
+**The rule.** `tools/convert.py` converts each program in
+`tools/convert`, runs it with `python3` and with `zeno run`, and
+compares what they print, or what Zeno prints with `x.expect` where a
+note says why it differs, and then the report must have that note. The
+first line of each program, `# kept: N`, is how many pieces are to be
+kept. `cargo test convert` has unit tests of the reader and the
+writer. The workflow `convert.yml` runs both on every push that
+changes the converter.
+
+**Why the count.** A rule that stops working keeps a piece that was
+Zeno, and the program still prints the same. Only the count shows it.
+
+### 62.20 Nothing else changes
+
+`convert` is a new command. No word, rule or library of the language
+was changed for it, and `tools/same.py` builds every earlier program
+as before. The command writes a new file and will not write over one
+unless it is told `--replace` or given `--to`.
+
+### 62.21 Left for later
+
+- **C** next: a file of C written as Zeno, what it cannot read left in
+  an `inline c` block, and `--declare header.h` to write the
+  declarations of `c.library` from a header.
+- **A list or dict given to a function of the block** where the Zeno
+  never uses it again after the call, which would be safe.
+- **`lambda`, functions inside functions, tuples as values**, as Zeno
+  gets them.
+- **TypeScript and JavaScript**, then Java.
+
+**How it is built.** `convert.rs`: the command, `Note`, `Report`.
+`convert_python.rs`: `lex`, `pieces`, `Parser`. `convert_python_write.rs`:
+`units_of`, `names_of`, `loop_names`, `spread`, `tables_of`, `round`,
+`plan` with `outlasting` and `after_kept_loops`, `Helper`, `assemble`,
+`convert`. `convert_python_values.rs`: `expr` and the rest of an
+expression. `convert_python_lines.rs`: `statement`, `for_loop`,
+`function`, `class`.
