@@ -91,6 +91,11 @@ The numbers are the decisions, for anyone who wants the argument.
   themselves are not there (44.9). \verb|--llvm| and \verb|--target|
   refuse \verb|import c|, and it has not been run with a
   cross-compiler's own libraries or on a board.
+\item[An \texttt{inline} block] is of C, Python or JavaScript, and
+  not of Ruby, PHP, Lua, C\#, C++ or assembly by itself. A block of C
+  cannot name a library it needs, and Zeno sees its functions and not
+  its constants. \verb|--llvm| and \verb|--target| refuse a block,
+  and every build refuses one of Python or JavaScript (61.11, 61.19).
 \item[A call the C compiler can work out.] A built program's
   \verb|m.cbrt(27.0)| is worked out by GCC before the program runs,
   rounded exactly, where \verb|zeno run| asks the library: the two can

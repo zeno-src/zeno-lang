@@ -26,6 +26,11 @@ So the checker reads the declarations and checks every call before the
 program runs, and \verb|zeno build| calls the function directly, with
 nothing in between. That is what firmware needs.
 
+A few functions of C can also be written in the \verb|.zeno| file
+itself, in an \verb|inline c| block, which gives the same kind of
+library with nothing declared. That is the next chapter
+(\hyperref[ch-inline]{Another Language in a Zeno File}).
+
 \begin{note}
 Nothing changes for a program that does not say \verb|import c|. What
 C needs is started by the first \verb|c.library| that runs, and a
@@ -59,6 +64,8 @@ Given & What it is \\
 \verb|"z"| & a library of the system, by its name: \verb|-lz|, as C is
   built with it \\
 \verb|"crc.c"| & a file of C, built with the rest \\
+\verb|"startup.s"| & a file of assembly, which the C compiler assembles
+  (\verb|.s|, \verb|.S|) \\
 \verb|"libtemp.so"| & a library that was built already: \verb|.so|,
   \verb|.a|, \verb|.o|, \verb|.dylib|, \verb|.dll| \\
 \verb|"-DSTEP=3"| & anything that starts with \verb|-| goes to the

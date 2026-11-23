@@ -1,0 +1,495 @@
+\chapter{Another Language in a Zeno File}\label{ch-inline}
+
+Some code is already written, and is in another language: a checksum
+out of a board's firmware, a few lines of Python that use a library, a
+function of JavaScript from a page. Since 0.9 an \verb|inline| block
+holds it in a \verb|.zeno| file as it was written, and the program
+calls it:
+
+\begin{zeno}[file=ones.zeno, dir=blocks]
+import c
+
+let bits = inline c {
+    #include <stdint.h>
+
+    /* How many bits of x are 1. */
+    int ones(uint32_t x) {
+        int count = 0;
+        for (; x != 0; x &= x - 1) {
+            count++;
+        }
+        return count;
+    }
+}
+
+print(bits.ones(0xA5))
+\end{zeno}
+
+What is between the first line and the last \verb|}| is C, and is not
+read as Zeno. \verb|bits| is a library of C, as \verb|c.library| gives
+one (\hyperref[ch-c-libraries]{Libraries of C}), and \verb|ones| is a
+function of it.
+
+There are three kinds of block:
+
+\begin{center}
+\begin{tabular}{llP{6.4cm}}
+\toprule
+Written & Holds & Gives \\
+\midrule
+\verb|inline c| & C & a library of C: the functions the block writes
+  out \\
+\verb|inline python| & Python & a module of Python: what the block
+  defines \\
+\verb|inline node| & JavaScript & what the block puts in
+  \verb|exports| \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{note}
+Nothing changes for a program that has no block. A block is asked for
+twice: by the word \verb|inline|, and by the \verb|import| of its
+language at the top of the file. \verb|inline| is not a reserved
+word, and \verb|let inline = 3| still means what it meant.
+\end{note}
+
+\section{Why Zeno is not a superset of C, or of Python}
+
+It would be one way to use code that is already written: make every
+program of C a program of Zeno, as every program of C is nearly one of
+C++, and every program of JavaScript is one of TypeScript. Zeno does
+not, for three reasons.
+
+A superset has to take every program of the other language, for ever,
+with every mistake that language allows. The first thing given up
+would be the checks Zeno is for: a sum that cannot overflow unseen, a
+name that cannot be \verb|none| unseen. A superset of two languages
+cannot exist where they disagree, and \verb|a / b|, \verb|{}| and
+\verb|'x'| each mean something else in C, Python and JavaScript. And a
+superset of one language is a dialect of it: TypeScript cannot mend
+the \verb|==| of JavaScript.
+
+A block gets the same result for the person with the code. It is
+used as it is, today, by that language's own compiler, and Zeno stays
+one language with one set of rules.
+
+\section{What it needs}
+
+What the \verb|import| of the language needs, and nothing more: a C
+compiler for \verb|inline c|, as for \verb|import c| and
+\verb|zeno build|; Python 3 for \verb|inline python|; Node for
+\verb|inline node|
+(\hyperref[ch-other-languages]{Libraries of Other Languages}).
+
+\section{Writing a block}
+
+\begin{zenofrag}[parse=no]
+let name = inline c {
+    ...the other language...
+}
+\end{zenofrag}
+
+\begin{itemize}
+\item \textbf{A block is the whole value of a \texttt{let}.} What it
+  has is then used through that name. It may be at the top of a file,
+  in a function, or in a test.
+\item \textbf{The first line ends with the \texttt{\{}.}
+  \verb|inline|, the language, \verb|{|, and the end of the line.
+\item \textbf{Everything inside is further in than the line that
+  opens the block.} How far is up to you; \verb|zeno format| sets it
+  one step in.
+\item \textbf{The block ends at a line that holds only \texttt{\}}},
+  as far in as the line that opened it.
+\end{itemize}
+
+That last rule is why a block needs no care. A \verb|}| of C is
+always further in than the block's own, so it ends nothing. Zeno does
+not look for the other language's strings and comments, and so cannot
+mistake one:
+
+\begin{zeno}[file=odd.zeno, dir=blocks]
+import c
+
+let odd = inline c {
+    /* A } in a comment, */
+    const char *closing(void) { return "} and one in a text"; }
+}
+
+print(odd.closing())
+\end{zeno}
+
+The indentation that every line of a block shares is not part of the
+block. Each line keeps how far in it is from the others, which in
+Python is part of the program.
+
+\begin{why}
+To find the end of a block by counting braces, Zeno would have to know
+what a brace inside a string or a comment looks like in each language:
+\verb|"}"|, \verb|'}'|, \verb|/* } */|, a template of JavaScript, a
+regular expression, a raw string of Python. That is a small reader for
+each language, each wrong somewhere, and the mistake it would make is
+the worst kind: the block ends early, and the rest of the other
+language's code is read as Zeno. A line that holds only \verb|}| at
+the first line's own indentation is found with no knowledge of the
+other language, and can be seen with the eye. It is the one place in
+Zeno where indentation means something, and a line that breaks the
+rule is refused, never guessed at. (Decision 61.3.)
+\end{why}
+
+\section{A block of C}
+
+Each function that is written out in the block, with its body, and is
+not \verb|static|, is a function of the library. Its types are read
+from its own first line, so nothing is declared a second time:
+
+\begin{zeno}[file=frame.zeno, dir=blocks]
+import c
+
+let frame = inline c {
+    #include <stdint.h>
+    #include <stddef.h>
+
+    #define POLYNOMIAL 0xA001
+
+    static uint16_t step(uint16_t crc) {
+        return (crc & 1) ? (crc >> 1) ^ POLYNOMIAL : crc >> 1;
+    }
+
+    uint16_t crc16(const uint8_t *data, size_t length) {
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 0; i < length; i++) {
+            crc ^= data[i];
+            for (int bit = 0; bit < 8; bit++) {
+                crc = step(crc);
+            }
+        }
+        return crc;
+    }
+}
+
+let request: list[u8] = [0x01, 0x03, 0x00, 0x6B, 0x00, 0x03]
+print(frame.crc16(request, len(request)))
+\end{zeno}
+
+\verb|crc16| is a function of \verb|frame|. \verb|step| is
+\verb|static|, so it is the block's own, and so are
+\verb|POLYNOMIAL|, a variable, a \verb|typedef| and a \verb|struct|:
+they are there for the block's functions, and Zeno leaves them alone.
+
+A call is checked before the program runs, as a call of a function of
+Zeno is:
+
+\begin{zeno}[file=calls.zeno, dir=blocks, cmd=zeno check {file}, fails=yes]
+import c
+
+let frame = inline c {
+    #include <stdint.h>
+    #include <stddef.h>
+
+    static uint16_t step(uint16_t crc) { return crc >> 1; }
+
+    uint16_t crc16(const uint8_t *data, size_t length) {
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 0; i < length; i++) {
+            crc = step(crc ^ data[i]);
+        }
+        return crc;
+    }
+}
+
+print(frame.crc16(3, 1))
+print(frame.crc16([1, 2]))
+print(frame.step(1))
+\end{zeno}
+
+Values go across as they do for \verb|c.library|: a whole number is
+checked to fit the type the function takes, a list is lent for a
+pointer and copied back unless the pointer is to \verb|const|, text
+goes as a \verb|const char *|, and any other pointer C gives back is
+kept as it is. It is one table for both, and it is in the last
+chapter. A header is included as in C: one of the system in
+\verb|< >|, one of the program in \verb|" "|, found from the folder of
+the \verb|.zeno| file.
+
+A mistake in the block is the C compiler's to find, and it is told
+where each line of the block was written, so what it says names the
+\verb|.zeno| file:
+
+\begin{zeno}[file=sensor.zeno, dir=blocks, fails=yes]
+import c
+
+let lib = inline c {
+    int twice(int x) { return 2 * y; }
+}
+
+print(lib.twice(21))
+\end{zeno}
+
+The line is the line of the \verb|.zeno| file. The column is counted
+from where the lines of the block begin, since the indentation they
+share is not part of the block.
+
+A block that does not compile stops the program where the block is.
+No \verb|try| catches it: the program is wrong, and running it again
+will not help.
+
+\begin{center}
+\begin{tabular}{P{6.2cm}P{6.6cm}}
+\toprule
+A block of C cannot have & What to do \\
+\midrule
+a function Zeno cannot call that is not \verb|static|: one that takes
+  \verb|...|, a function, or a whole struct & mark it \verb|static| if
+  only the block calls it, or write a function beside it that Zeno can
+  call \\
+no function Zeno can call & write one out, with its body, without
+  \verb|static| \\
+C++ & functions of C++ marked \verb|extern "C"|, built into a library,
+  go to \verb|c.library| \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{What zeno build does with a block}
+
+A build that writes C writes the block into the program's C, as it
+was written. There is no library beside the program and nothing
+between a call and the function: \verb|frame.crc16(...)| is a call of
+\verb|crc16| in the same file, which the C compiler may put in line.
+
+\begin{zeno}[file=frame.zeno, dir=blocks, show=no, cmd=zeno build {file} ;; ./frame ;; zeno build --no-collector --minimal {file} ;; ./frame ;; grep -c "^#line" frame.c]
+import c
+
+let frame = inline c {
+    #include <stdint.h>
+    #include <stddef.h>
+
+    #define POLYNOMIAL 0xA001
+
+    static uint16_t step(uint16_t crc) {
+        return (crc & 1) ? (crc >> 1) ^ POLYNOMIAL : crc >> 1;
+    }
+
+    uint16_t crc16(const uint8_t *data, size_t length) {
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 0; i < length; i++) {
+            crc ^= data[i];
+            for (int bit = 0; bit < 8; bit++) {
+                crc = step(crc);
+            }
+        }
+        return crc;
+    }
+}
+
+let request: list[u8] = [0x01, 0x03, 0x00, 0x6B, 0x00, 0x03]
+print(frame.crc16(request, len(request)))
+\end{zeno}
+
+Every build that writes C does it: a plain one, \verb|--firmware|,
+\verb|--no-collector|, \verb|--owned|, \verb|--minimal|,
+\verb|--release|, \verb|--fast|, \verb|--board|, and
+\verb|zeno test --build| (\hyperref[ch-compiling]{Compiling}). The
+last line above counts the lines of the built C that begin with
+\verb|#line|. There are two: one before the block, which names the
+\verb|.zeno| file and the line the block began on, and one after it,
+which gives the lines that follow back to the C file. So a mistake
+the C compiler finds, and a line a debugger stops at, is a line of the
+\verb|.zeno| file.
+
+Under \verb|zeno run| the block is built once into a small library,
+kept, and called through the helper that \verb|import c| uses; it is
+built again when the block changes.
+
+\section{Assembly}
+
+Assembly is written inside a block of C, as the C compiler takes it:
+
+\begin{zenofrag}[parse=no]
+import c
+
+let cpu = inline c {
+    #include <stdint.h>
+
+    /* Interrupts off, on a Cortex-M. What PRIMASK was is given back. */
+    uint32_t interrupts_off(void) {
+        uint32_t was;
+        __asm__ volatile ("mrs %0, primask\n cpsid i" : "=r" (was));
+        return was;
+    }
+}
+\end{zenofrag}
+
+There is no \verb|inline asm|. Assembly has no types, so nothing in it
+says what a routine takes or gives, and the C function around it is
+what says so. It is also not one language: each processor has its own
+instructions and each compiler its own way of writing them, and the C
+compiler already knows both.
+
+A whole file of assembly is given to \verb|c.library|, beside the
+\verb|.c| files it takes:
+
+\begin{zenofrag}
+let start = c.library("startup.s", "void reset(void);")
+\end{zenofrag}
+
+The C compiler assembles it, a \verb|.s| as it is and a \verb|.S|
+after reading its \verb|#include| and \verb|#define| lines.
+
+\section{A block of Python}
+
+\begin{zeno}[file=stats.zeno, dir=blocks]
+import python
+
+let stats = inline python {
+    import statistics
+
+    def summary(readings):
+        """The middle and the spread of some readings."""
+        return [statistics.median(readings), statistics.pstdev(readings)]
+}
+
+print(stats.summary([21.5, 22.0, 23.5]))
+\end{zeno}
+
+The block is a module of Python: what \verb|python.module| would give
+if the lines were in a \verb|.py| file. Everything it defines is
+reached with a dot: a function, a class, a variable, and a module the
+block imported (\verb|stats.statistics|). Values go across as for
+\verb|import python|.
+
+The block runs when the program gets to it, once, top to bottom, as a
+module does when it is imported. An error of Python in it stops the
+program, and names the line of the \verb|.zeno| file:
+
+\begin{zeno}[file=wrong.zeno, dir=blocks, fails=yes]
+import python
+
+let stats = inline python {
+    def summary(readings:
+        return max(readings)
+}
+
+print(stats.summary([1, 2]))
+\end{zeno}
+
+\section{A block of JavaScript}
+
+\begin{zeno}[file=written.zeno, dir=blocks]
+import node
+
+let written = inline node {
+    exports.number = (value, place) => new Intl.NumberFormat(place).format(value)
+}
+
+print(written.number(1234567.5, "en-IN"))
+print(written.number(1234567.5, "de-DE"))
+\end{zeno}
+
+The block is a module of Node, as a \verb|.js| file is: what it puts
+in \verb|exports|, or gives \verb|module.exports|, is what the block
+gives, and \verb|require| finds the packages \verb|npm install| put in
+the program's folder. It is a module of the older kind, with
+\verb|require| and \verb|exports|; \verb|import| and \verb|export| are
+not read there. Values go across as for \verb|import node|.
+
+\section{What each command does with a block}
+
+\begin{center}
+\begin{tabular}{P{4.2cm}P{4.2cm}P{4.2cm}}
+\toprule
+ & \verb|inline c| & \verb|inline python|, \verb|inline node| \\
+\midrule
+\verb|zeno run|, \verb|zeno test| & built once, kept, and called
+  through the C helper & given to the Python or the Node that the
+  \verb|import| starts \\
+\verb|zeno check| & the functions and every call of them are
+  checked & checked when the program runs \\
+\verb|zeno build|, and every build that writes C & written into the
+  program's C & refused \\
+\verb|zeno check --strict| & as \verb|zeno check| & refused: what it
+  gives is not known before the program runs \\
+\verb|zeno build --llvm| & refused & refused \\
+\verb|zeno build --target| & refused & refused \\
+the playground & refused: a page has no C compiler & refused \\
+\verb|zeno format| & the lines of the block are left as they are, one
+  step in & the same \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A refusal is an error with the line of the block, when the program is
+checked or built. A block is never skipped.
+
+\section{What Zeno cannot check}
+
+The code in a block is the other language's, and Zeno checks none of
+it. A pointer that is wrong in a block of C damages memory as it does
+in C: a built program stops or goes wrong, and under \verb|zeno run|
+the helper stops and Zeno says which call it was waiting for. The
+blocks of a program are the lines to read then, and
+\verb|grep -n "inline c"| finds them all, as \verb|grep -n unsafe|
+finds the other lines of that kind (\hyperref[ch-unsafe]{Unsafe Code}).
+
+\section{What is not there yet}
+
+\begin{itemize}
+\item \textbf{A library for a block.} A block of C that needs a
+  library other than C's own (\verb|-lz|) has nowhere to say so. Until
+  it has, the code goes in a \verb|.c| file given to \verb|c.library|
+  with the library.
+\item \textbf{A constant of a block.} A \verb|#define| or a variable
+  of a block is not seen by Zeno; a function that gives it is.
+  \verb|c.library| can declare a value.
+\item \textbf{Small types given back as themselves.} A
+  \verb|uint16_t| comes back as an \verb|int|, as for
+  \verb|c.library|.
+\item \textbf{Blocks of Ruby, PHP, Lua and C\#.} Each has an
+  \verb|import| already and can be given a block in the same way.
+\item \textbf{\texttt{zeno build --llvm}} with a block of C.
+\end{itemize}
+
+\section{How it is built}
+
+The lexer decides: \verb|inline|, a name, a \verb|{| and the end of
+the line begin a block, and it is the one place the lexer looks
+further than two characters ahead. It reads the lines to the closing
+one and makes of them one token, which holds the language and the
+text. The parser allows that token only as the value of a
+\verb|let|.
+
+For a block of C, the checker finds the functions: it goes through
+the text once, stepping over comments, strings, lines that begin with
+\verb|#| and bodies between braces, and keeps the first line of each
+function that is not \verb|static|. Those lines are what
+\verb|c.library| would have been given, and from there a block is a
+library: the checker, \verb|zeno run| and \verb|zeno build| use what
+\verb|import c| built. A block of Python is compiled by Python's own
+\verb|compile|, with as many empty lines before it as the
+\verb|.zeno| file has above it, so that the line numbers Python
+counts are the file's. The reasons are chapter 61 of
+\verb|docs/decisions.md|, and \verb|examples/bits.zeno| and
+\verb|examples/report.zeno| are two whole programs.
+
+\section{Things to try}
+
+\begin{enumerate}
+\item Run \verb|examples/bits.zeno|, then build it and run what was
+  built. Open \verb|bits.c| and find the block. What is on the line
+  before it, and on the line after?
+\item In the first program of this chapter, write \verb|count+++;| in
+  the block and run it. Which file and line does the C compiler name?
+\item Mark \verb|ones| as \verb|static| and run \verb|zeno check|.
+  Read the message. Then write a second function that is not
+  \verb|static| and calls it.
+\item Write \verb|let m = inline python {| in a file with no
+  \verb|import python|, and read what Zeno says.
+\item Write a block of Python with a class in it, make an object of
+  the class from Zeno, and call a method. Then do the same with a
+  class of JavaScript and \verb|node.new|.
+\item Put a \verb|}| on a line by itself in the middle of a block of
+  C, as far in as the rest of the block. Does it end the block? Move
+  it out to where the \verb|let| begins and run \verb|zeno check|
+  again.
+\end{enumerate}
