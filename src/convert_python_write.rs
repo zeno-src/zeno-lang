@@ -25,7 +25,7 @@
 //! `print` will show. They are worked out in rounds, each using what the
 //! round before found, until nothing changes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::convert::{zeno_text, Converted, KeptPiece, Note, Report};
 use crate::convert_python::*;
@@ -448,6 +448,16 @@ fn always_leaves(stmts: &[Stmt]) -> bool {
     }
 }
 
+/// Whether these statements never go on to the line after their block:
+/// they return, raise, or go to the next time round a loop or out of it.
+fn leaves_its_block(stmts: &[Stmt]) -> bool {
+    match stmts.last().map(|stmt| &stmt.kind) {
+        Some(S::Continue | S::Break) => true,
+        Some(S::If { branches, otherwise: Some(otherwise) }) => branches.iter().all(|(_, body, _)| leaves_its_block(body)) && leaves_its_block(otherwise),
+        _ => always_leaves(stmts),
+    }
+}
+
 fn has_break(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|stmt| match &stmt.kind {
         S::Break => true,
@@ -503,6 +513,9 @@ struct Plan {
     /// The names declared before a statement, with a first value.
     hoist: HashMap<usize, Vec<String>>,
     locals: HashSet<String>,
+    /// The `for` and its name → the name the loop of Zeno counts with,
+    /// where the name of Python is a variable that outlasts the loop.
+    renamed: HashMap<(usize, String), String>,
 }
 
 struct Planner {
@@ -511,6 +524,11 @@ struct Planner {
     /// The blocks that are the body of a loop.
     loops: HashSet<usize>,
     globals: HashSet<String>,
+    /// The blocks that are the body of a `try` whose every `except`
+    /// leaves (`continue`, `return`, ...) and reads nothing the body gives
+    /// a value: past the `try`, every line of the body at its own level
+    /// has run.
+    whole_or_gone: HashSet<usize>,
 }
 
 fn address(stmt: &Stmt) -> usize {
@@ -688,7 +706,17 @@ impl Planner {
             S::Class { name, .. } => return keep(line, format!("the class `{name}` is written inside a function or a block")),
             S::Return(value) | S::Raise(value) => value.iter().for_each(|value| self.reads(value, path, anchors)),
             S::Try { body, handlers } => {
-                self.inner(body, path, anchors, false)?;
+                let mut given = HashSet::new();
+                bound_names(body, &mut given);
+                let leaves = handlers.iter().all(|handler| {
+                    let mut reads = false;
+                    each_expr_of(&handler.body, &mut |expr| reads |= matches!(&expr.kind, E::Name(name) if given.contains(name)));
+                    leaves_its_block(&handler.body) && !reads
+                });
+                let id = self.inner(body, path, anchors, false)?;
+                if leaves {
+                    self.whole_or_gone.insert(id);
+                }
                 for handler in handlers {
                     let id = self.blocks + 1;
                     if let Some(name) = &handler.name {
@@ -782,17 +810,26 @@ fn global_names(stmts: &[Stmt], into: &mut HashSet<String>) {
 /// the parameters. `changed_elsewhere` are names that some other
 /// function gives a value, and `read_elsewhere` those another function
 /// reads, which must then be declared outside every block.
-fn plan(blocks: &[&[Stmt]], given: &[String], changed_elsewhere: &HashSet<String>, read_elsewhere: &HashSet<String>, known: &Known, scope: &str) -> Kept<Plan> {
-    let mut planner = Planner { events: Vec::new(), blocks: 0, loops: HashSet::new(), globals: HashSet::new() };
+///
+/// `kills` go with `blocks`: before each block, the names that pieces
+/// kept as Python gave a value there, each with the line of its piece.
+/// That value is in Python only, so a line of Zeno that reads the name
+/// after it must read a value that Zeno gave it after it.
+fn plan(blocks: &[&[Stmt]], kills: &[HashMap<String, usize>], given: &[String], changed_elsewhere: &HashSet<String>, read_elsewhere: &HashSet<String>, known: &Known, scope: &str) -> Kept<Plan> {
+    let mut planner = Planner { events: Vec::new(), blocks: 0, loops: HashSet::new(), globals: HashSet::new(), whole_or_gone: HashSet::new() };
     for stmts in blocks {
         global_names(stmts, &mut planner.globals);
     }
     let mut path = Vec::new();
     let mut anchors = Vec::new();
+    let mut starts = Vec::new();
     for stmts in blocks {
+        starts.push(planner.events.len());
         planner.block(stmts, &mut path, &mut anchors)?;
     }
     let mut made = Plan::default();
+    outlasting(&mut planner, &mut made, given, changed_elsewhere, read_elsewhere, known);
+    after_kept_loops(&planner, &starts, kills)?;
     for event in &planner.events {
         if given.contains(&event.name) && matches!(event.kind, Ev::Loop(_) | Ev::Caught(_) | Ev::Func) {
             return keep(event.line, format!("`{}` is a parameter, and the variable of a loop, an `except` or a function inside as well", event.name));
@@ -826,8 +863,12 @@ fn plan(blocks: &[&[Stmt]], given: &[String], changed_elsewhere: &HashSet<String
             if matches!(first.kind, Ev::Read | Ev::Aug) {
                 return keep(first.line, format!("`{name}` is used outside {what}, where Zeno no longer has it"));
             }
+            // A loop further down may count with the name, if it is
+            // outside the block the variable is declared in.
             let begins = all.iter().position(|event| std::ptr::eq(*event, first)).unwrap_or(0);
-            if let Some(event) = all[begins..].iter().find(|event| matches!(event.kind, Ev::Loop(_) | Ev::Caught(_))) {
+            let outside = read_elsewhere.contains(&name) || changed_elsewhere.contains(&name);
+            let in_its_block = !outside && events.iter().all(|event| event.path.starts_with(&first.path));
+            if let Some(event) = all[begins..].iter().find(|event| matches!(event.kind, Ev::Loop(_) | Ev::Caught(_)) && (!in_its_block || event.path.starts_with(&first.path))) {
                 return keep(event.line, format!("`{name}` is a variable, and further down the variable of a loop or of an `except` as well: Python has one variable for both"));
             }
         }
@@ -875,6 +916,100 @@ fn plan(blocks: &[&[Stmt]], given: &[String], changed_elsewhere: &HashSet<String
         made.hoist.entry(first.anchors[shared]).or_default().push(name.clone());
     }
     Ok(made)
+}
+
+/// The variable of a `for` is the loop's own in Zeno, and gone after it.
+/// In Python it is a variable like any other: it can be read after the
+/// loop, given another value inside it, and be a plain variable before.
+/// Where a program does one of these, the loop of Zeno counts with a
+/// name of its own, and its first line gives the value to the variable:
+///
+/// ```text
+/// for line_item in lines {
+///     line = line_item
+/// ```
+///
+/// From there the name is planned as the plain variable it is.
+fn outlasting(planner: &mut Planner, made: &mut Plan, given: &[String], changed_elsewhere: &HashSet<String>, read_elsewhere: &HashSet<String>, known: &Known) {
+    let mut names: Vec<String> = Vec::new();
+    for event in &planner.events {
+        if matches!(event.kind, Ev::Loop(_)) && !names.contains(&event.name) && !given.contains(&event.name) {
+            names.push(event.name.clone());
+        }
+    }
+    let taken: HashSet<String> = planner.events.iter().map(|event| event.name.clone()).chain(given.iter().cloned()).chain(known.vars.keys().map(|(_, name)| name.clone())).chain(known.functions.keys().cloned()).collect();
+    for name in names {
+        let all: Vec<&Event> = planner.events.iter().filter(|event| event.name == name).collect();
+        if all.iter().any(|event| matches!(event.kind, Ev::Caught(_) | Ev::Func)) {
+            continue;
+        }
+        let loops: Vec<usize> = all.iter().filter_map(|event| if let Ev::Loop(id) = event.kind { Some(id) } else { None }).collect();
+        let inside = |event: &Event| event.path.iter().any(|id| loops.contains(id));
+        let changed_inside = all.iter().any(|event| inside(event) && !matches!(event.kind, Ev::Loop(_) | Ev::Read));
+        let outside: Vec<usize> = (0..all.len()).filter(|&at| !inside(all[at]) && !matches!(all[at].kind, Ev::Loop(_))).collect();
+        let outlasts = match outside.first() {
+            None => changed_elsewhere.contains(&name) || read_elsewhere.contains(&name),
+            Some(&first) => {
+                // The plain variable is declared in the block of its first
+                // value if every use is in there, and a loop further down
+                // can have the name for its own only outside that block.
+                let plain = all[first];
+                let in_its_block = outside.iter().all(|&at| all[at].path.starts_with(&plain.path)) && !changed_elsewhere.contains(&name) && !read_elsewhere.contains(&name);
+                matches!(plain.kind, Ev::Read | Ev::Aug)
+                    || !in_its_block
+                    || all[first..].iter().any(|event| matches!(event.kind, Ev::Loop(_)) && event.path.starts_with(&plain.path))
+            }
+        };
+        if !(changed_inside || outlasts) {
+            continue;
+        }
+        let mut counts_with = format!("{name}_item");
+        let mut number = 2;
+        while taken.contains(&counts_with) {
+            counts_with = format!("{name}_item_{number}");
+            number += 1;
+        }
+        for event in planner.events.iter_mut().filter(|event| event.name == name) {
+            if let Ev::Loop(id) = event.kind {
+                let of = event.anchors.last().copied().unwrap_or(0);
+                made.renamed.insert((of, name.clone()), counts_with.clone());
+                event.kind = Ev::Bind;
+                event.path.push(id);
+                event.anchors.push(of);
+            }
+        }
+    }
+}
+
+/// A line of Zeno that reads a name after a piece kept as Python gave it
+/// a value reads a value Zeno gave it after that piece: the first use
+/// after it gives a value, and every other use runs after that.
+fn after_kept_loops(planner: &Planner, starts: &[usize], kills: &[HashMap<String, usize>]) -> Kept<()> {
+    for (at, killed) in kills.iter().enumerate() {
+        for (name, &line) in killed {
+            check_after_kept_loop(planner, starts, kills, name, starts[at], line)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_after_kept_loop(planner: &Planner, starts: &[usize], kills: &[HashMap<String, usize>], name: &str, from: usize, line: usize) -> Kept<()> {
+    // Up to the next kept piece that gives the name a value.
+    let to = starts.iter().zip(kills).filter(|(start, killed)| **start > from && killed.contains_key(name)).map(|(start, _)| *start).min().unwrap_or(planner.events.len());
+    let all: Vec<&Event> = planner.events[from..to].iter().filter(|event| event.name == name).collect();
+    // The loops of Zeno with the same variable have one of their own.
+    let loops: Vec<usize> = all.iter().filter_map(|event| if let Ev::Loop(id) | Ev::Caught(id) = event.kind { Some(id) } else { None }).collect();
+    let plain: Vec<&Event> = all.into_iter().filter(|event| !matches!(event.kind, Ev::Loop(_) | Ev::Caught(_)) && !event.path.iter().any(|id| loops.contains(id))).collect();
+    // A use reads a value Zeno gave the name if a line above gave it
+    // one for certain: it is in the same block as that line or further
+    // in, a `try` that is run whole or left counting as no block.
+    let solid = |event: &Event| event.path.iter().copied().filter(|id| !planner.whole_or_gone.contains(id)).collect::<Vec<usize>>();
+    let given = |event: &Event| matches!(event.kind, Ev::Bind | Ev::BindTwice);
+    let at = plain.iter().enumerate().find(|(at, event)| !given(event) && !plain[..*at].iter().any(|before| given(before) && solid(event).starts_with(&solid(before)))).map(|(_, event)| event.line);
+    match at {
+        Some(at) => keep(at, format!("`{name}` may still hold here the value that the piece at line {line} gave it, and that piece is kept as Python")),
+        None => Ok(()),
+    }
 }
 
 /// What a variable of this type holds before the program gives it a
@@ -949,7 +1084,7 @@ fn shape_of<'a>(stmt: &'a Stmt, is_dataclass: &dyn Fn(&Expr) -> bool) -> Kept<Sh
                 if value.as_ref().is_some_and(|value| !is_fixed_or_empty(value)) {
                     return keep(part.line, format!("the first value of the field `{field}` is more than a fixed value"));
                 }
-                shape.fields.push(ShapeField { name: field.clone(), param: field.clone(), given: value.is_none(), default: value.as_ref(), annotation: Some(annotation) });
+                shape.fields.push(ShapeField { name: field.clone(), param: field.clone(), given: true, default: value.as_ref(), annotation: Some(annotation) });
             }
             S::Def(def) => {
                 if def.params.first().map(|param| param.name.as_str()) != Some("self") {
@@ -1042,6 +1177,8 @@ struct Env<'a> {
     /// What each function and method of the file may change: see
     /// `effects_of`.
     effects: &'a HashMap<String, HashSet<String>>,
+    /// Every name written in the file of Python.
+    file_names: &'a HashSet<String>,
 }
 
 struct Writer<'a> {
@@ -1079,6 +1216,8 @@ struct Writer<'a> {
     comment_at: usize,
     need_math: bool,
     need_program: bool,
+    /// The functions the file gets written out for it (`Helper`).
+    helpers: BTreeSet<Helper>,
 }
 
 impl<'a> Writer<'a> {
@@ -1106,6 +1245,7 @@ impl<'a> Writer<'a> {
             comment_at: 0,
             need_math: false,
             need_program: false,
+            helpers: BTreeSet::new(),
         }
     }
 }
@@ -1376,9 +1516,18 @@ fn free_in(lines: &[(usize, &[Tok])]) -> HashSet<String> {
             at = after;
         } else if is_word(first, "class") {
             // What the lines of a class give a value is not seen by its
-            // methods, so nothing is taken away.
+            // methods, so nothing else is taken away; but the name that
+            // such a line gives a value (`title: str`, `count = 0`) is
+            // the class's own, and not read from the file.
             names_on(line.get(2..).unwrap_or(&[]), &mut uses);
-            uses.extend(free_in(&lines[at + 1..after]));
+            let body: Vec<(usize, &[Tok])> = lines[at + 1..after]
+                .iter()
+                .map(|&(inner_level, inner)| {
+                    let gives = inner_level == level + 1 && is_name(&inner[0]).is_some() && (is_op(inner.get(1), ":") || is_op(inner.get(1), "="));
+                    (inner_level, if gives { &inner[1..] } else { inner })
+                })
+                .collect();
+            uses.extend(free_in(&body));
             at = after;
         } else {
             names_on(line, &mut uses);
@@ -1468,7 +1617,7 @@ fn names_of(toks: &[Tok], kind: Kind) -> (Vec<String>, HashSet<String>, HashSet<
             }
         }
     }
-    let own = if kind == Kind::Action { loop_names(toks, &lines) } else { HashSet::new() };
+    let own = if kind == Kind::Action { loop_names(&lines) } else { HashSet::new() };
     (defines, uses, made_with, own)
 }
 
@@ -1476,17 +1625,30 @@ fn names_of(toks: &[Tok], kind: Kind) -> (Vec<String>, HashSet<String>, HashSet<
 /// one comes after the loop has given it a value: the loop has no
 /// `else`, the names are not in what it goes over, and nothing in it
 /// could read them later (a function, a `lambda`) or by another way.
-fn loop_names(toks: &[Tok], lines: &[(usize, &[Tok])]) -> HashSet<String> {
+fn loop_names(lines: &[(usize, &[Tok])]) -> HashSet<String> {
     const READS_LATER: &[&str] = &["lambda", "def", "class", "global", "nonlocal", "del", "exec", "eval", "globals", "locals", "vars"];
     let mut own = HashSet::new();
     let Some((_, first)) = lines.first() else { return own };
     if !is_word(first.first(), "for") || lines.iter().skip(1).any(|(level, _)| *level == 0) {
         return own;
     }
-    if toks.iter().any(|tok| matches!(&tok.kind, T::Name(word) if READS_LATER.contains(&word.as_str()))) {
+    let Some(end) = first.iter().position(|tok| is_word(Some(tok), "in")) else { return own };
+    // What the loop goes over runs once, before the loop: a `lambda` there
+    // cannot keep the loop's variable for later. Past the `:`, it can.
+    let mut depth = 0usize;
+    let colon = first.iter().enumerate().skip(end).find_map(|(at, tok)| {
+        match &tok.kind {
+            T::Op("(" | "[" | "{") => depth += 1,
+            T::Op(")" | "]" | "}") => depth = depth.saturating_sub(1),
+            T::Op(":") if depth == 0 => return Some(at),
+            _ => {}
+        }
+        None
+    });
+    let body = first[colon.map_or(first.len(), |at| at + 1)..].iter().chain(lines.iter().skip(1).flat_map(|(_, line)| line.iter()));
+    if first[..end].iter().chain(body).any(|tok| matches!(&tok.kind, T::Name(word) if READS_LATER.contains(&word.as_str()))) {
         return own;
     }
-    let Some(end) = first.iter().position(|tok| is_word(Some(tok), "in")) else { return own };
     for tok in &first[1..end] {
         match (&tok.kind, is_name(tok)) {
             (_, Some(name)) => {
@@ -1587,11 +1749,11 @@ fn units_of(lexed: &Lexed, source: &[&str]) -> Vec<Unit> {
         let main_guard = stmts.as_ref().is_some_and(|stmts| is_main_guard(stmts));
         units.push(Unit { piece, stmts, kept, kind, label, defines, uses, main_guard, constant: false, made_with, own });
     }
-    // A loop's variable is its own only if every piece that has the name
-    // has it for its own.
-    let shared: HashSet<String> = units.iter().flat_map(|unit| unit.defines.iter().chain(&unit.uses).filter(|name| !unit.own.contains(*name))).cloned().collect();
+    // What a function or a class reads of the file is read when it is
+    // called, which can be after any loop: a name it reads is no loop's own.
+    let read_by_functions: HashSet<String> = units.iter().filter(|unit| matches!(unit.kind, Kind::Def | Kind::Class)).flat_map(|unit| unit.uses.iter().cloned()).collect();
     for unit in &mut units {
-        unit.own.retain(|name| !shared.contains(name));
+        unit.own.retain(|name| !read_by_functions.contains(name));
     }
     // A name with one meaning in the whole file.
     let mut count: HashMap<&str, usize> = HashMap::new();
@@ -1616,25 +1778,46 @@ fn units_of(lexed: &Lexed, source: &[&str]) -> Vec<Unit> {
     units
 }
 
-/// Python can only call Python. So a piece that a kept piece uses is
-/// kept too, and so is a piece that gives a value to a name that a kept
-/// piece gives one to: a variable lives on one side. An `import` and a
-/// fixed value are written on both sides instead, and so is the variable
-/// of a loop that no other piece reads.
+/// The variable of a loop that is kept as Python, and that no piece of
+/// Python reads from it: what the loop leaves in it is not used by the
+/// Python, and the plan of the file sees to it that no line of Zeno
+/// reads it either (`plan`, `kills`).
+fn kept_own(unit: &Unit, name: &str) -> bool {
+    unit.kept.is_some() && unit.own.contains(name)
+}
+
+/// Python can only call Python, and a variable lives on one side. So:
+///
+/// - A piece that gives a name a value that a kept piece reads is kept
+///   too, if the kept piece can run after it: it is further down, or it
+///   is a function or a class, which run when they are called.
+/// - A piece that gives a value to a name that a kept function or class
+///   gives a meaning, or to a name that a kept piece gives a value and a
+///   function of Zeno reads, is kept too.
+///
+/// A name that a kept piece and a piece of Zeno both give a value is
+/// otherwise a variable on each side: the plan of the file sees to it
+/// that a line of Zeno past the kept piece reads only what Zeno gave it
+/// there (`plan`, `kills`). An `import` and a fixed value are written on
+/// both sides, and the variable of a kept loop is that loop's own
+/// (`kept_own`).
 fn spread(units: &mut [Unit]) {
     loop {
+        let read_by_functions: HashSet<&String> = units.iter().filter(|unit| unit.kept.is_none() && matches!(unit.kind, Kind::Def | Kind::Class)).flat_map(|unit| &unit.uses).collect();
         let mut more: Vec<(usize, usize, String)> = Vec::new();
         for (at, unit) in units.iter().enumerate() {
             if unit.kept.is_some() || unit.kind == Kind::Import || unit.constant {
                 continue;
             }
-            for kept in units.iter().filter(|other| other.kept.is_some()) {
+            for (kept_at, kept) in units.iter().enumerate().filter(|(_, other)| other.kept.is_some()) {
                 let line = kept.piece.line;
-                if let Some(name) = unit.defines.iter().find(|name| kept.uses.contains(*name) && !unit.own.contains(*name)) {
+                let runs_after = kept_at > at || matches!(kept.kind, Kind::Def | Kind::Class);
+                if let Some(name) = unit.defines.iter().find(|name| runs_after && kept.uses.contains(*name) && !kept_own(kept, name)) {
                     more.push((at, unit.piece.line, format!("`{name}` is used by the piece at line {line}, which is kept as Python, and Python can call only Python")));
                     break;
                 }
-                if let Some(name) = unit.defines.iter().find(|name| kept.kind != Kind::Import && kept.defines.contains(name) && !unit.own.contains(*name)) {
+                let one_side = |name: &String| matches!(kept.kind, Kind::Def | Kind::Class) || read_by_functions.contains(name);
+                if let Some(name) = unit.defines.iter().find(|name| kept.kind != Kind::Import && kept.defines.contains(name) && !kept_own(kept, name) && one_side(name)) {
                     more.push((at, unit.piece.line, format!("`{name}` is also given a value by the piece at line {line}, which is kept as Python")));
                     break;
                 }
@@ -1787,7 +1970,7 @@ fn tables_of(units: &[Unit]) -> Result<Tables<'_>, Vec<(usize, Keep)>> {
     let mut failed = Vec::new();
     for unit in units {
         if unit.kept.is_some() {
-            for name in unit.defines.iter().filter(|name| !unit.own.contains(*name)) {
+            for name in unit.defines.iter().filter(|name| !kept_own(unit, name)) {
                 // What a kept function says it gives is believed, if it
                 // is a kind of value that is the same on both sides.
                 let ty = match unit.stmts.as_deref() {
@@ -1871,6 +2054,76 @@ fn tables_of(units: &[Unit]) -> Result<Tables<'_>, Vec<(usize, Keep)>> {
     }
 }
 
+/// A function of Python that Zeno has no word for, and that a file which
+/// uses it gets written out in Zeno, once, below the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) enum Helper {
+    /// `sorted(xs)`: a list of Zeno is sorted where it is.
+    Sorted,
+    /// `xs.remove(x)`.
+    Remove,
+    /// `text.split(by, most)`.
+    SplitAtMost,
+    /// `text * count`.
+    Repeated,
+}
+
+impl Helper {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Helper::Sorted => "sorted",
+            Helper::Remove => "remove_item",
+            Helper::SplitAtMost => "split_at_most",
+            Helper::Repeated => "repeated",
+        }
+    }
+
+    fn lines(self) -> &'static [&'static str] {
+        match self {
+            Helper::Sorted => &[
+                "# convert: Python's `sorted`, a copy of a list with the smallest first.",
+                "function sorted[T is Ordered](items: list[T]) -> list[T] {",
+                "    let copy = items.slice(0)",
+                "    copy.sort()",
+                "    return copy",
+                "}",
+            ],
+            Helper::Remove => &[
+                "# convert: Python's `remove`, which takes out the first item equal to the one given.",
+                "function remove_item[T](items: list[T], item: T) raises ValueError {",
+                "    let at = items.find(item)",
+                "    if at is none {",
+                "        raise ValueError(\"list.remove(x): x not in list\")",
+                "    }",
+                "    items.pop(at)",
+                "}",
+            ],
+            Helper::SplitAtMost => &[
+                "# convert: Python's `split` with a number: the text is cut at the first so many places only.",
+                "function split_at_most(text: str, by: str, most: int) -> list[str] {",
+                "    let parts = text.split(by)",
+                "    if most < 0 or len(parts) <= most + 1 {",
+                "        return parts",
+                "    }",
+                "    let out = parts.slice(0, most)",
+                "    out.append(parts.slice(most).join(by))",
+                "    return out",
+                "}",
+            ],
+            Helper::Repeated => &[
+                "# convert: Python's `text * count`, the text that many times over.",
+                "function repeated(text: str, count: int) -> str {",
+                "    var out = \"\"",
+                "    for time in range(count) {",
+                "        out += text",
+                "    }",
+                "    return out",
+                "}",
+            ],
+        }
+    }
+}
+
 /// One round over every piece that is to be Zeno.
 struct Round {
     found: Known,
@@ -1879,11 +2132,24 @@ struct Round {
     notes: Vec<(Note, usize)>,
     need_math: bool,
     need_program: bool,
+    helpers: BTreeSet<Helper>,
 }
 
-fn round(units: &[Unit], tables: &Tables, comments: &[Comment], block: &str, known: &Known, last: bool) -> Round {
-    let blocks: Vec<&[Stmt]> = units.iter().filter(|unit| unit.kept.is_none() && unit.kind == Kind::Action).map(|unit| unit.statements()).collect();
-    let (module_plan, plan_failed) = match plan(&blocks, &[], &tables.changed_in_functions, &tables.read_in_functions, known, "") {
+fn round(units: &[Unit], tables: &Tables, comments: &[Comment], block: &str, file_names: &HashSet<String>, known: &Known, last: bool) -> Round {
+    let mut blocks: Vec<&[Stmt]> = Vec::new();
+    let mut kills: Vec<HashMap<String, usize>> = Vec::new();
+    let mut killed: HashMap<String, usize> = HashMap::new();
+    for unit in units {
+        if unit.kept.is_some() && unit.kind == Kind::Action {
+            for name in unit.defines.iter().filter(|name| unit.own.contains(*name) || tables.module_vars.contains(*name)) {
+                killed.insert(name.clone(), unit.piece.line);
+            }
+        } else if unit.kept.is_none() && unit.kind == Kind::Action {
+            blocks.push(unit.statements());
+            kills.push(std::mem::take(&mut killed));
+        }
+    }
+    let (module_plan, plan_failed) = match plan(&blocks, &kills, &[], &tables.changed_in_functions, &tables.read_in_functions, known, "") {
         Ok(plan) => (plan, None),
         Err(keep) => (Plan::default(), Some(keep)),
     };
@@ -1900,6 +2166,7 @@ fn round(units: &[Unit], tables: &Tables, comments: &[Comment], block: &str, kno
         module_plan: &module_plan,
         comments,
         effects: &tables.effects,
+        file_names,
     };
     let mut writer = Writer::new(&env);
     let mut written = Vec::new();
@@ -1934,7 +2201,7 @@ fn round(units: &[Unit], tables: &Tables, comments: &[Comment], block: &str, kno
         }
         written.push(Some(done.map(|()| std::mem::take(&mut writer.lines))));
     }
-    Round { found: writer.found, written, notes: writer.notes, need_math: writer.need_math, need_program: writer.need_program }
+    Round { found: writer.found, written, notes: writer.notes, need_math: writer.need_math, need_program: writer.need_program, helpers: writer.helpers }
 }
 
 // ------------------------------------------------------------ The result
@@ -2091,6 +2358,12 @@ fn assemble(units: &[Unit], lexed: &Lexed, source: &[&str], tables: &Tables, las
         text.push("}".to_string(), None);
     }
     text.blank();
+    for helper in &last.helpers {
+        for line in helper.lines() {
+            text.push(line.to_string(), None);
+        }
+        text.blank();
+    }
 
     // A function that reads a variable of the file goes below the line
     // that declares the variable: in Zeno a line can use only what is
@@ -2221,6 +2494,7 @@ pub fn convert(source: &str, file: &str) -> Converted {
     let source_lines: Vec<&str> = source.lines().collect();
     let mut units = units_of(&lexed, &source_lines);
     let block = block_name(&lexed);
+    let file_names: HashSet<String> = lexed.toks.iter().filter_map(|tok| if let T::Name(name) = &tok.kind { Some(name.clone()) } else { None }).collect();
     // Each time round, at least one more piece is kept, so this ends.
     loop {
         spread(&mut units);
@@ -2235,27 +2509,28 @@ pub fn convert(source: &str, file: &str) -> Converted {
         };
         let mut known = Known::default();
         for _ in 0..12 {
-            let found = round(&units, &tables, &lexed.comments, &block, &known, false).found;
+            let found = round(&units, &tables, &lexed.comments, &block, &file_names, &known, false).found;
             let merged = known.merged(&found);
             if merged == known {
                 break;
             }
             known = merged;
         }
-        let last = round(&units, &tables, &lexed.comments, &block, &known, true);
+        let last = round(&units, &tables, &lexed.comments, &block, &file_names, &known, true);
         let failed: Vec<(usize, Keep)> = last.written.iter().enumerate().filter_map(|(at, written)| match written {
             Some(Err(keep)) => Some((at, keep.clone())),
             _ => None,
         }).collect();
         if !failed.is_empty() {
             drop(tables);
-            // A type that is not known is often not known because of
-            // another piece that cannot be written. So the pieces with
-            // a reason of their own are kept first, and the rest are
-            // asked again.
+            // What one piece cannot be written for is often what another
+            // piece became: a type that is not known, a name that holds
+            // a function because the line that gives it one cannot be
+            // written. So one piece is kept at a time, the first that has
+            // a reason of its own, and the rest are asked again.
             let unknown = |keep: &Keep| keep.why.contains("is not known");
-            let own: Vec<(usize, Keep)> = failed.iter().filter(|(_, keep)| !unknown(keep)).cloned().collect();
-            let now = if own.is_empty() { failed.into_iter().take(1).collect() } else { own };
+            let first = failed.iter().find(|(_, keep)| !unknown(keep)).or(failed.first()).cloned();
+            let now: Vec<(usize, Keep)> = first.into_iter().collect();
             for (at, keep) in now {
                 units[at].kept = Some((keep.line, keep.why));
             }
@@ -2297,5 +2572,104 @@ pub fn convert(source: &str, file: &str) -> Converted {
             .collect();
         let report = Report { pieces: units.len(), noted, kept, whole: None, warnings: Vec::new() };
         return Converted { zeno, report };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn converted(source: &str) -> Converted {
+        let done = convert(source, "test.py");
+        assert!(mistakes(&done.zeno).is_empty(), "the converter wrote what Zeno's checker refuses:\n{}", done.zeno);
+        done
+    }
+
+    fn kept_lines(done: &Converted) -> Vec<usize> {
+        done.report.kept.iter().map(|piece| piece.line).collect()
+    }
+
+    #[test]
+    fn a_program_zeno_has_words_for_is_zeno_through_and_through() {
+        let done = converted("def twice(n):\n    return n * 2\n\n\ntotal = 0\nfor n in range(4):\n    total += twice(n)\nprint(total)\n");
+        assert!(done.report.kept.is_empty());
+        assert!(!done.zeno.contains("inline python"));
+        assert!(done.zeno.contains("function twice(n: int) -> int {"));
+        assert!(done.zeno.contains("var total = 0"));
+    }
+
+    #[test]
+    fn what_cannot_be_read_is_kept_and_called() {
+        let done = converted("square = lambda x: x * x\nprint(square(3))\n");
+        assert_eq!(kept_lines(&done), vec![1]);
+        assert!(done.report.kept[0].why.contains("lambda"));
+        assert!(done.zeno.contains("let py = inline python {"));
+        assert!(done.zeno.contains("py.square(3)"));
+    }
+
+    #[test]
+    fn a_kept_piece_does_not_pull_the_pieces_above_it_into_python() {
+        // The loop at line 3 is kept; the loop above it, with a variable of
+        // the same name, stays Zeno, and so does the one below.
+        let done = converted("for item in [1, 2]:\n    print(item)\nfor item in (lambda: [3])():\n    print(item)\nfor item in [4]:\n    print(item)\n");
+        assert_eq!(kept_lines(&done), vec![3]);
+    }
+
+    #[test]
+    fn a_line_of_zeno_never_reads_what_a_kept_piece_left_in_a_name() {
+        // A name only the kept piece gives a value is read from Python.
+        let done = converted("n = (lambda: 5)()\nm = 1\nprint(n, m)\n");
+        assert_eq!(kept_lines(&done), vec![1]);
+        assert!(done.zeno.contains("print(py.n, m)"));
+        // Zeno gives `n` a value too, but not for certain before the line
+        // that reads it: that line is kept, and so is the piece above it.
+        let done = converted("n = (lambda: 5)()\nif len(\"ab\") > 1:\n    n = 2\nprint(n)\n");
+        assert_eq!(kept_lines(&done), vec![1, 2, 4]);
+        assert!(done.report.kept.iter().any(|piece| piece.why.contains("may still hold here the value that the piece at line 1 gave it")));
+        // Zeno gives it a value for certain: the rest is Zeno.
+        let done = converted("n = (lambda: 5)()\nn = 2\nprint(n)\n");
+        assert_eq!(kept_lines(&done), vec![1]);
+    }
+
+    #[test]
+    fn a_loop_variable_read_after_the_loop_is_a_variable() {
+        let done = converted("for word in [\"a\", \"b\"]:\n    pass\nprint(word)\n");
+        assert!(done.report.kept.is_empty());
+        assert!(done.zeno.contains("for word_item in [\"a\", \"b\"] {"));
+        assert!(done.zeno.contains("word = word_item"));
+    }
+
+    #[test]
+    fn rows_are_gone_over_by_place_and_mixed_numbers_are_kept() {
+        let done = converted("for name, age in [(\"ann\", 30), (\"bob\", 41)]:\n    print(name, age)\n");
+        assert!(done.report.kept.is_empty());
+        assert!(done.zeno.contains("let age = [30, 41][row_1]"));
+        let done = converted("for name, price in [(\"tea\", 2), (\"jam\", 1.5)]:\n    print(name, price)\n");
+        assert_eq!(kept_lines(&done), vec![1]);
+    }
+
+    #[test]
+    fn what_python_has_and_zeno_has_not_is_written_once_and_only_if_used() {
+        let done = converted("print(sorted([3, 1]), \"-\" * 3)\n");
+        assert!(done.zeno.contains("function sorted[T is Ordered]"));
+        assert!(done.zeno.contains("function repeated("));
+        assert!(!done.zeno.contains("function remove_item"));
+        // A name the file has already is not taken for one.
+        let done = converted("repeated = 2\nprint(\"-\" * repeated)\n");
+        assert_eq!(kept_lines(&done), vec![2]);
+    }
+
+    #[test]
+    fn a_part_of_a_list_is_cut_as_python_cuts_it() {
+        let done = converted("xs = [1, 2, 3]\nprint(xs[1:10], xs[-2:])\n");
+        assert!(done.zeno.contains("xs.slice(min(1, len(xs)), min(10, len(xs)))"));
+        assert!(done.zeno.contains("xs.slice(max(len(xs) - 2, 0))"));
+    }
+
+    #[test]
+    fn a_loop_whose_list_a_called_function_changes_is_kept() {
+        let done = converted("queue = [1]\n\n\ndef grow(n):\n    if n < 3:\n        queue.append(n + 1)\n\n\nfor n in queue:\n    grow(n)\nprint(queue)\n");
+        assert!(kept_lines(&done).contains(&9));
+        assert!(done.report.kept.iter().any(|piece| piece.why.contains("`grow`, which the loop calls")));
     }
 }

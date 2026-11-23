@@ -713,6 +713,12 @@ impl Writer<'_> {
             "*" | "/" | "//" | "%" => PRODUCT,
             _ => POWER,
         };
+        // `"-" * 20`: Zeno has no `*` for a text.
+        if op == "*" && matches!((&left.ty, &right.ty), (Ty::Str, Ty::Int) | (Ty::Int, Ty::Str)) {
+            self.helper(Helper::Repeated, line)?;
+            let (text, count) = if left.ty == Ty::Str { (left, right) } else { (right, left) };
+            return Ok(atom(format!("repeated({}, {})", text.text, count.text), Ty::Str));
+        }
         let both_numbers = is_number(&left.ty) && is_number(&right.ty);
         let both_ints = left.ty == Ty::Int && right.ty == Ty::Int;
         let ty = match op {
@@ -916,10 +922,15 @@ impl Writer<'_> {
             }
             parts[at] = Some(record(self, at, arg)?);
         }
+        // In order while every field has a value; past a field left to its
+        // default, by name.
         let mut texts = Vec::new();
+        let mut by_name = false;
         for (at, part) in parts.into_iter().enumerate() {
             match part {
+                Some(text) if by_name => texts.push(format!("{}={text}", takes[at].name)),
                 Some(text) => texts.push(text),
+                None if takes[at].default.is_some() => by_name = true,
                 None => return keep(line, format!("`{class}` is given no value for `{}`", takes[at].param)),
             }
         }
@@ -1181,7 +1192,22 @@ impl Writer<'_> {
                 }
             }
             "input" => keep(line, "`input`: at the end of what is typed Python raises an error, and Zeno gives `none`"),
-            "sorted" => keep(line, "`sorted` in a place other than `name = sorted(a_list)`"),
+            "sorted" => {
+                if !named.is_empty() {
+                    return keep(line, "`sorted` with `key=` or `reverse=`");
+                }
+                let [value] = self.args_exactly::<1>(name, args, named, line)?;
+                let ordered = |item: &Ty| matches!(item, Ty::Int | Ty::Float | Ty::Str | Ty::Unset);
+                self.helper(Helper::Sorted, line)?;
+                match &value.ty {
+                    Ty::Unset => Ok(later()),
+                    Ty::List(item) if ordered(item) => Ok(atom(format!("sorted({})", value.text), value.ty.clone())),
+                    Ty::Dict(key, _) if ordered(key) => Ok(atom(format!("sorted({}.keys())", value.at(ATOM)), Ty::List(key.clone()))),
+                    Ty::Dyn => self.unknown(line, "what `sorted` is given"),
+                    Ty::List(of) | Ty::Dict(of, _) if **of == Ty::Dyn => self.unknown(line, "what `sorted` is given"),
+                    other => keep(line, format!("`sorted` of {}", described(other))),
+                }
+            }
             "range" | "enumerate" | "zip" | "reversed" => keep(line, format!("`{name}` in a place other than the `for` it counts for")),
             "open" => keep(line, "`open`: files are not translated yet"),
             "isinstance" | "type" => keep(line, format!("`{name}` asks for the type of a value while the program runs")),
@@ -1234,6 +1260,17 @@ impl Writer<'_> {
             ("strip", 0) => Ok(atom(format!("{on_text}.strip()"), Ty::Str)),
             ("splitlines", 0) => Ok(atom(format!("{on_text}.lines()"), Ty::List(Box::new(Ty::Str)))),
             ("split", 0) if named.is_empty() => Ok(atom(format!("{on_text}.split()"), Ty::List(Box::new(Ty::Str)))),
+            ("split", 2) => {
+                let [by, most] = self.args_exactly::<2>(&what, args, named, line)?;
+                if !is_text(&by) || !matches!(most.ty, Ty::Int | Ty::Unset) {
+                    return keep(line, "`split` by something other than a text, or with something other than a whole number");
+                }
+                if matches!(&args[0].kind, E::Str(lit) if lit.body.is_empty()) {
+                    return keep(line, "`split` by an empty text, which Python refuses");
+                }
+                self.helper(Helper::SplitAtMost, line)?;
+                Ok(atom(format!("split_at_most({}, {}, {})", on.text, by.text, most.text), Ty::List(Box::new(Ty::Str))))
+            }
             ("split", 1) => {
                 let [by] = self.args_exactly::<1>(&what, args, named, line)?;
                 if !is_text(&by) {
@@ -1281,6 +1318,16 @@ impl Writer<'_> {
                     self.found.fields.entry(key).or_default().add(&ty, &before);
                 }
             }
+            // An item of a list or a dict: the list or the dict holds a
+            // value of this type, `d[k].append(x)` as much as `d[k] = x`.
+            E::Index(of, key) => match self.quietly(of).map(|value| value.ty) {
+                Ok(Ty::List(_)) => self.widen(of, Ty::List(Box::new(ty))),
+                Ok(Ty::Dict(..)) => {
+                    let key = self.quietly(key).map_or(Ty::Unset, |value| value.ty);
+                    self.widen(of, Ty::Dict(Box::new(key), Box::new(ty)));
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -1294,6 +1341,15 @@ impl Writer<'_> {
         self.notes.truncate(notes);
         self.foreign_calls = calls;
         value
+    }
+
+    /// A function the file gets written out for it, if the name is free.
+    fn helper(&mut self, helper: Helper, line: usize) -> Kept<()> {
+        if self.env.file_names.contains(helper.name()) && helper != Helper::Sorted {
+            return keep(line, format!("the converter writes this with a function `{}`, and the file has that name already", helper.name()));
+        }
+        self.helpers.insert(helper);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1330,6 +1386,17 @@ impl Writer<'_> {
                 other => keep(line, format!("`sort` of a list of {}", described(other))),
             },
             ("copy", 0) if named.is_empty() => Ok(atom(format!("{on_text}.slice(0)"), on.ty.clone())),
+            ("remove", 1) => {
+                let [value] = self.args_exactly::<1>(&what, args, named, line)?;
+                match item {
+                    Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Unset => {}
+                    Ty::Dyn => return self.unknown(line, "the items of the list"),
+                    other => return keep(line, format!("`remove` from a list of {}, which Zeno may compare otherwise", described(other))),
+                }
+                self.equal_ok(&value.ty, item, line)?;
+                self.helper(Helper::Remove, line)?;
+                Ok(atom(format!("remove_item({}, {})", on.text, value.text), Ty::NoneT))
+            }
             ("sort", _) => keep(line, "`sort` with `key=` or `reverse=`"),
             _ => keep(line, format!("`.{method}()` of a list with these arguments has no match in Zeno yet")),
         }

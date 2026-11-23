@@ -1046,6 +1046,23 @@ impl<'a> Parser<'a> {
         Ok(base)
     }
 
+    /// `item for name in items if condition`, the `for` read already.
+    fn list_from_loop(&mut self, item: Expr, line: usize) -> Kept<Expr> {
+        let name = self.for_name()?;
+        if self.is_op(",") {
+            return keep(line, "a list made from a loop over pairs");
+        }
+        if !self.take_word("in") {
+            return keep(line, "a list made from a loop the converter cannot read");
+        }
+        let items = self.or()?;
+        let condition = if self.take_word("if") { Some(Box::new(self.or()?)) } else { None };
+        if self.is_word("for") || self.is_word("if") {
+            return keep(line, "a list made from two loops, or with two conditions");
+        }
+        Ok(Expr { kind: E::ListOf { item: Box::new(item), name, items: Box::new(items), condition }, line })
+    }
+
     fn postfix(&mut self) -> Kept<Expr> {
         let mut value = self.atom()?;
         loop {
@@ -1070,9 +1087,24 @@ impl<'a> Parser<'a> {
                         if !named.is_empty() {
                             return keep(line, "an argument with no name after one with a name");
                         }
-                        let arg = self.expression()?;
+                        let mut arg = self.expression()?;
                         if self.is_word("for") {
-                            return keep(line, "a generator in the brackets of a call (`sum(x for x in xs)`)");
+                            // `sum(x for x in xs)`: these take every item
+                            // and give nothing back until they have, so a
+                            // list of the items is the same to them.
+                            let takes_all = match &value.kind {
+                                E::Name(name) => matches!(name.as_str(), "sum" | "min" | "max" | "sorted" | "list"),
+                                E::Attr(_, method) => method == "join",
+                                _ => false,
+                            };
+                            if !takes_all || !args.is_empty() {
+                                return keep(line, "a generator in the brackets of a call, other than of `sum`, `min`, `max`, `sorted`, `list` and `join`");
+                            }
+                            self.at += 1;
+                            arg = self.list_from_loop(arg, line)?;
+                            if !self.is_op(")") {
+                                return keep(line, "a generator in the brackets of a call, with more after it");
+                            }
                         }
                         args.push(arg);
                     }
@@ -1160,20 +1192,9 @@ impl<'a> Parser<'a> {
                 }
                 let first = self.expression()?;
                 if self.take_word("for") {
-                    let name = self.for_name()?;
-                    if self.is_op(",") {
-                        return keep(line, "a list made from a loop over pairs");
-                    }
-                    if !self.take_word("in") {
-                        return keep(line, "a list made from a loop the converter cannot read");
-                    }
-                    let items = self.or()?;
-                    let condition = if self.take_word("if") { Some(Box::new(self.or()?)) } else { None };
-                    if self.is_word("for") || self.is_word("if") {
-                        return keep(line, "a list made from two loops, or with two conditions");
-                    }
+                    let made = self.list_from_loop(first, line)?;
                     self.expect_op("]")?;
-                    return Ok(Expr { kind: E::ListOf { item: Box::new(first), name, items: Box::new(items), condition }, line });
+                    return Ok(made);
                 }
                 items.push(first);
                 while self.take_op(",") {
@@ -1421,6 +1442,7 @@ mod tests {
             ("x = [a for a in b for c in d]\n", 1, "two loops"),
             ("@cache\ndef f():\n    pass\n", 1, "`@cache`"),
             ("print(x for x in y)\n", 1, "generator"),
+            ("sum((x for x in y), 1)\n", 1, "generator"),
             ("xs[::2]\n", 1, "step"),
         ] {
             let Err(keep) = tree(source) else { panic!("{source} was read") };

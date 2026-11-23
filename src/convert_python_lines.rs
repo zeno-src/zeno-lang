@@ -20,17 +20,6 @@ fn mentions(expr: &Expr, name: &str) -> bool {
     found
 }
 
-/// `sorted(xs)` with nothing else: the list.
-fn sorted_of(expr: &Expr) -> Option<&Expr> {
-    match &expr.kind {
-        E::Call { function, args, named } if named.is_empty() && args.len() == 1 => match &function.kind {
-            E::Name(name) if name == "sorted" => Some(&args[0]),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// `d.items()`, `enumerate(xs)` and their like: the method or function,
 /// and what it is of.
 fn pairs_of(expr: &Expr) -> Option<(&str, &Expr)> {
@@ -43,6 +32,13 @@ fn pairs_of(expr: &Expr) -> Option<(&str, &Expr)> {
         (E::Name(name), [of]) if name == "enumerate" => Some(("enumerate", of)),
         _ => None,
     }
+}
+
+/// `[("ann", 2019), ("bob", 2021)]`: rows of fixed values written out,
+/// each with this many.
+fn fixed_rows(items: &Expr, width: usize) -> bool {
+    let E::List(rows) = &items.kind else { return false };
+    !rows.is_empty() && rows.iter().all(|row| matches!(&row.kind, E::Tuple(parts) if parts.len() == width && parts.iter().all(is_fixed)))
 }
 
 fn has_inner_function(stmts: &[Stmt]) -> Option<usize> {
@@ -253,7 +249,7 @@ impl Writer<'_> {
                 done?;
                 self.put("}");
             }
-            S::For { names, items, body } => self.for_loop(names, items, body, line)?,
+            S::For { names, items, body } => self.for_loop(stmt, names, items, body, line)?,
             S::Def(def) => return keep(line, format!("the function `{}` is written inside a function or a block, which is not translated yet", def.name)),
             S::Class { name, .. } => return keep(line, format!("the class `{name}` is written inside a function or a block")),
             S::Return(value) => self.returns(value.as_ref(), line)?,
@@ -359,6 +355,16 @@ impl Writer<'_> {
         }
     }
 
+    /// Whether working this out changes nothing and cannot fail: a
+    /// literal, a name, a field of an object.
+    fn calm(&mut self, expr: &Expr) -> bool {
+        match &expr.kind {
+            E::Name(_) => true,
+            E::Attr(of, _) => self.calm(of) && matches!(self.expr_type(of), Ty::Object(_)),
+            _ => is_fixed(expr),
+        }
+    }
+
     /// `name = value`, where the plan says whether the name is declared
     /// on this line.
     fn store(&mut self, stmt: &Stmt, name: &str, value: &Val, line: usize) -> Kept<()> {
@@ -385,39 +391,54 @@ impl Writer<'_> {
         match &target.kind {
             E::Name(name) => {
                 if let E::IfElse { then, condition, otherwise } = &value.kind {
-                    // `x = a if c else b`: `b` first, then `a` if `c`.
-                    // `b` is worked out whether or not `c` holds, so it
-                    // must be something that working out changes nothing.
-                    if !(is_fixed(otherwise) || matches!(otherwise.kind, E::Name(_))) || mentions(condition, name) || mentions(then, name) {
-                        return keep(line, "`a if c else b` where `b` is more than a name or a literal, or where the name is used in `a` or `c`");
+                    if self.calm(otherwise) && !mentions(condition, name) && !mentions(then, name) {
+                        // `x = a if c else b`: `b` first, then `a` if `c`.
+                        // `b` is worked out whether or not `c` holds, so
+                        // it must be something that working out changes
+                        // nothing and cannot fail.
+                        let other = self.expr(otherwise)?;
+                        let test = self.truth(condition)?;
+                        let first = self.expr(then)?;
+                        self.store(stmt, name, &other, line)?;
+                        self.bind(name, &first.ty);
+                        let whole = self.whole_ty(name);
+                        let (text, _) = self.fitted(name, &first, &whole, line)?;
+                        self.put(format!("if {} {{", test.text));
+                        self.indent += 1;
+                        self.put(format!("{name} = {text}"));
+                        self.indent -= 1;
+                        self.put("}");
+                        return Ok(());
                     }
-                    let other = self.expr(otherwise)?;
+                    // Otherwise an `if` with an `else`, and before it the
+                    // variable with the first value of its type, if this
+                    // is the line that declares it.
                     let test = self.truth(condition)?;
                     let first = self.expr(then)?;
-                    self.store(stmt, name, &other, line)?;
+                    let second = self.expr(otherwise)?;
+                    self.zeno_name(name, line)?;
+                    self.narrow.retain(|narrowed| narrowed != name);
                     self.bind(name, &first.ty);
+                    self.bind(name, &second.ty);
                     let whole = self.whole_ty(name);
-                    let (text, _) = self.fitted(name, &first, &whole, line)?;
+                    let (first, _) = self.fitted(name, &first, &whole, line)?;
+                    let (second, _) = self.fitted(name, &second, &whole, line)?;
+                    if self.plan_now().declare.contains_key(&(address(stmt), name.to_string())) && self.env.last {
+                        match (first_value(&whole), zeno_type(&whole)) {
+                            (Some(value), Some(ty)) => self.put(format!("var {name}: {ty} = {value}")),
+                            _ => return keep(line, format!("`{name}` gets its first value from `a if c else b`, and Zeno has no first value for {}", described(&whole))),
+                        }
+                    }
                     self.put(format!("if {} {{", test.text));
                     self.indent += 1;
-                    self.put(format!("{name} = {text}"));
+                    self.put(format!("{name} = {first}"));
+                    self.indent -= 1;
+                    self.put("} else {");
+                    self.indent += 1;
+                    self.put(format!("{name} = {second}"));
                     self.indent -= 1;
                     self.put("}");
                     return Ok(());
-                }
-                if let Some(list) = sorted_of(value) {
-                    if !self.is_var("sorted") {
-                        let list = self.expr(list)?;
-                        match &list.ty {
-                            Ty::List(item) if matches!(**item, Ty::Int | Ty::Float | Ty::Str | Ty::Unset) => {}
-                            Ty::Unset => {}
-                            other => return keep(line, format!("`sorted` of {}", described(other))),
-                        }
-                        let copy = atom(format!("{}.slice(0)", list.at(ATOM)), list.ty.clone());
-                        self.store(stmt, name, &copy, line)?;
-                        self.put(format!("{name}.sort()"));
-                        return Ok(());
-                    }
                 }
                 let value = self.expr(value)?;
                 self.store(stmt, name, &value, line)
@@ -572,12 +593,18 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn for_loop(&mut self, names: &[String], items: &Expr, body: &[Stmt], line: usize) -> Kept<()> {
-        for name in names {
+    fn for_loop(&mut self, stmt: &Stmt, python_names: &[String], items: &Expr, body: &[Stmt], line: usize) -> Kept<()> {
+        for name in python_names {
             self.zeno_name(name, line)?;
         }
+        // A name that outlasts its loop is a variable, and the loop
+        // counts with a name of its own (`outlasting`).
+        let names: Vec<String> = python_names.iter().map(|name| self.plan_now().renamed.get(&(address(stmt), name.clone())).unwrap_or(name).clone()).collect();
+        let names = names.as_slice();
+        let types: Vec<Ty>;
         let calls = self.foreign_calls;
         let mut foreign = false;
+        let mut columns: Vec<String> = Vec::new();
         let header = match (pairs_of(items), names) {
             // `for k, v in d.items()` and `for i, x in enumerate(xs)`:
             // a `for` of Zeno with two names gives exactly these.
@@ -591,8 +618,7 @@ impl Writer<'_> {
                     (_, other) => return keep(line, format!("a loop over `{how}` of {}", described(other))),
                 };
                 self.unchanged(of, body, false, line)?;
-                self.bind(first, &one);
-                self.bind(second, &two);
+                types = vec![one, two];
                 format!("for {first}, {second} in {} {{", on.text)
             }
             (Some((how @ ("keys" | "values"), of)), [name]) => {
@@ -603,7 +629,7 @@ impl Writer<'_> {
                     other => return keep(line, format!("a loop over `{how}` of {}", described(other))),
                 };
                 self.unchanged(of, body, how == "keys", line)?;
-                self.bind(name, &each);
+                types = vec![each];
                 match how {
                     "keys" => format!("for {name} in {} {{", on.text),
                     _ => format!("for {name} in {}.values() {{", on.at(ATOM)),
@@ -614,12 +640,61 @@ impl Writer<'_> {
                 foreign = each == Ty::Foreign;
                 let values_only = matches!(self.expr_type(items), Ty::Dict(..));
                 self.unchanged(items, body, values_only, line)?;
-                self.bind(name, &each);
+                types = vec![each];
                 format!("for {name} in {over} {{")
             }
-            _ => return keep(line, "a `for` with several names, over something other than `d.items()` or `enumerate(a_list)`"),
+            // `for name, year in [("ann", 2019), ("bob", 2021)]`: a list of
+            // each, gone over by its place.
+            (None, [first, ..]) if fixed_rows(items, names.len()) => {
+                let E::List(rows) = &items.kind else { return keep(line, "a `for` over rows") };
+                let mut values: Vec<Vec<Val>> = vec![Vec::new(); names.len()];
+                let mut each: Vec<Ty> = vec![Ty::Unset; names.len()];
+                for row in rows {
+                    let E::Tuple(parts) = &row.kind else { continue };
+                    for (at, part) in parts.iter().enumerate() {
+                        let value = self.expr(part)?;
+                        each[at] = join(&each[at], &value.ty);
+                        values[at].push(value);
+                    }
+                }
+                let mut texts = Vec::new();
+                for (column, ty) in values.iter().zip(&each) {
+                    if !matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Unset) {
+                        return keep(line, format!("a `for` over rows that hold {}", described(ty)));
+                    }
+                    // Each value of Python keeps its own type: `2` among
+                    // floats is a whole number, and is printed as one.
+                    if column.iter().any(|value| value.ty != *ty && value.ty != Ty::Unset) {
+                        return keep(line, "a `for` over rows where one place holds whole numbers and floats both");
+                    }
+                    let items: Vec<String> = column.iter().map(|value| value.text.clone()).collect();
+                    texts.push(format!("[{}]", items.join(", ")));
+                }
+                let row = format!("row_{line}");
+                if self.env.file_names.contains(&row) {
+                    return keep(line, format!("the converter goes over these rows with a name `{row}`, and the file has that name already"));
+                }
+                for (name, text) in names.iter().zip(&texts).skip(1) {
+                    columns.push(format!("let {name} = {text}[{row}]"));
+                }
+                types = each;
+                format!("for {row}, {first} in {} {{", texts[0])
+            }
+            _ => return keep(line, "a `for` with several names, over something other than `d.items()`, `enumerate(a_list)` or rows written out"),
         };
         self.put(header);
+        self.indent += 1;
+        for column in columns {
+            self.put(column);
+        }
+        for ((name, counts_with), ty) in python_names.iter().zip(names).zip(types) {
+            if name == counts_with {
+                self.bind(name, &ty);
+            } else {
+                self.store(stmt, name, &atom(counts_with.clone(), ty), line)?;
+            }
+        }
+        self.indent -= 1;
         self.inner(body)?;
         self.put("}");
         if foreign && self.foreign_calls > calls + 1 {
@@ -866,7 +941,7 @@ impl Writer<'_> {
         }
         let given: Vec<String> = def.params.iter().map(|param| param.name.clone()).collect();
         let nothing = HashSet::new();
-        self.plan = match plan(&[&def.body], &given, &nothing, &nothing, env.known, key) {
+        self.plan = match plan(&[&def.body], &[], &given, &nothing, &nothing, env.known, key) {
             Ok(plan) => plan,
             Err(keep) => return Err(keep),
         };
