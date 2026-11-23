@@ -1,0 +1,142 @@
+\chapter{A File of C Written as Zeno}\label{ch-convert-c}
+
+\verb|zeno convert| reads C as well as Python. The promise is the one
+of the last chapter: what it writes is never silently wrong. What it
+can say in Zeno it says in Zeno, with the numbers C would give, bit
+for bit, and what it cannot it keeps as C, in an \verb|inline c| block
+that the Zeno calls.
+
+\section{A first file}
+
+Here is a small meter, in C:
+
+\begin{zeno}[file=meter.c, dir=convertc, src=tools/convert/meter.c, lines=2-59, run=no]
+\end{zeno}
+
+One command writes \verb|meter.zeno| beside it:
+
+\begin{zeno}[file=read.txt, dir=convertc, show=no, cmd=zeno convert meter.c]
+meter.c
+\end{zeno}
+
+This is the Zeno it wrote:
+
+\begin{zeno}[file=read.txt, dir=convertc, show=no, cmd=cat meter.zeno]
+meter.zeno
+\end{zeno}
+
+\verb|tick| keeps a count from one call to the next in a
+\verb|static| variable, which Zeno has no word for, so it stays C and
+\verb|main| calls it as \verb|c_part.tick()|. The rest is Zeno. The
+struct is a class and the arrays are lists. \verb|sum += bytes[i]| on
+a \verb|uint8_t| goes round at 256 as it does in C, written
+\verb|u8.wrap|. \verb|total / count| takes the quotient toward zero as
+C does, through a short helper with a comment that says why. The two
+pointers that \verb|limits| writes through are lists of one: the
+caller puts \verb|low| in \verb|low_box|, makes the call, and takes it
+out again.
+
+Both print the same:
+
+\begin{zeno}[file=read.txt, dir=convertc, show=no, cmd=zeno run meter.zeno ;; cc -o meter meter.c ;; ./meter]
+meter.zeno
+\end{zeno}
+
+\section{The numbers are C's}
+
+The converter reads each type as C does on a 64-bit machine, and
+writes the type of Zeno that gives the same sums:
+
+\begin{center}
+\begin{tabular}{lP{7cm}}
+\toprule
+C & Zeno \\
+\midrule
+\verb|uint8_t|, \verb|uint16_t|, \verb|uint32_t| & \verb|u8|, \verb|u16|,
+  \verb|u32|, with \verb|wrap| where C goes round \\
+\verb|char|, \verb|short|, \verb|int|, \verb|long| & \verb|int|, and a
+  store into a smaller type is checked \\
+\verb|size_t|, \verb|uint64_t| & \verb|int|, where the value is never
+  below zero; else kept \\
+\verb|float|, \verb|double| & \verb|f32|, \verb|float| \\
+\verb|char *| holding a text & \verb|str| \\
+\verb|struct| & a class \\
+an array & a list \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A signed sum that goes past the top is undefined in C, so no answer is
+C's: Zeno stops with \verb|OverflowError|, and the report says where a
+store into a smaller type is checked. \verb|/| and \verb|%| of whole
+numbers that may be below zero go through \verb|c_divide| and
+\verb|c_remainder|, which take the quotient toward zero; when both
+sides are never below zero they are \verb|//| and \verb|%|.
+
+\begin{note}
+A \verb|uint64_t| is written as an \verb|int|, so a sum past
+$2^{63}$ stops the program where C goes on to $2^{64}$ and round.
+That is loud, never wrong; but a hash of 64 bits stops where C's goes
+on, and is better left in the block for now.
+\end{note}
+
+\section{Structs and pointers}
+
+A struct is a value in C and a class is shared in Zeno. So the
+converter writes a copy, \verb|a.copy()|, wherever C copies:
+\verb|b = a;|, a struct put into an array, or given to a function that changes
+it. Where nothing can tell, as for a struct a function only reads, it
+writes none.
+
+Pointers are of a few kinds, and the converter writes four of them:
+
+\begin{center}
+\begin{tabular}{lP{7cm}}
+\toprule
+A pointer that & Is written as \\
+\midrule
+is indexed, or is an array parameter & a list \\
+points to one number written through & a list of one \\
+points to a struct & the object \\
+is \verb|const char *| & a text \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Everything else a pointer does is kept: a pointer variable, pointer
+sums, \verb|NULL|, \verb|malloc|, a list made of \verb|next| pointers.
+C does those well, and they have no Zeno that would read as Zeno.
+
+\section{What is kept, and what crosses}
+
+C can call only C, so a function that kept C calls is kept too. A
+variable lives on one side, so a global that kept C uses is kept, and
+so is Zeno that uses it. The Zeno calls the block with numbers, floats,
+bools and texts that C does not change; a call that would give it a
+struct or an array is kept. The block gets every \verb|#include|,
+\verb|#define|, struct and enum of the file, so the kept C is compiled
+as it was.
+
+A line of the preprocessor that chooses (\verb|#if|, \verb|#ifdef|)
+keeps the whole file, since it is two programs and the converter would
+have to pick one. A \verb|main(int argc, char **argv)| is kept and
+given the program's arguments, so \verb|zeno run tool.zeno a b| gives
+it what \verb|./tool a b| would.
+
+\section{What it does not promise}
+
+What C leaves undefined: a signed sum past the top and an index past
+the end make Zeno stop, and a variable C left without a value starts
+at 0. The order C works out the arguments of one call in is left to
+the compiler; Zeno's is left to right. \verb|long| is read as 64 bits,
+as everywhere but Windows. The rest is in \verb|docs/convert-c.md|.
+
+\section{How it is checked}
+
+The programs of C in \verb|tools/convert| are each built with
+\verb|cc| and run, converted and run with \verb|zeno run|, and what the
+two print and the status they end with are compared. Among them are a
+ring buffer, a frame parser and a state machine as they are written
+for a board, and all of that is written as Zeno, with nothing kept.
+As for Python, the converter reads what it wrote with Zeno's own
+checker before it writes the file.

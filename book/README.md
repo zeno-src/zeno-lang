@@ -1,7 +1,7 @@
 # The Zeno Book
 
 The whole of Zeno 0.8, and of 0.9 as far as it has come, from a first
-line to the inside of the compiler: 41 chapters in five parts, and
+line to the inside of the compiler: 42 chapters in five parts, and
 seven appendices.
 
 - `chapters/` holds the source, one LaTeX file for each chapter or
