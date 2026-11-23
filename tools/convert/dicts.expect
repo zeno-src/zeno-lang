@@ -1,0 +1,24 @@
+32 27 0 3
+true false true
+ann 32
+bob 27
+cy 45
+ann is 32
+bob is 27
+cy is 45
+32
+27
+45
+ann
+bob
+cy
+["ann", "bob", "cy"] [32, 27, 45]
+45 1
+m 1
+i 4
+s 4
+p 2
+two true
+2 [3] 2
+counted
+nothing counted

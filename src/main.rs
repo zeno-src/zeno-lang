@@ -20,6 +20,9 @@ mod bridge_c;
 mod builtins;
 mod bytecode;
 mod checker;
+mod convert;
+mod convert_python;
+mod convert_python_write;
 mod deflate;
 mod emit_bytecode;
 mod emit_c;
@@ -105,6 +108,11 @@ fn usage() {
     println!("  zeno format <file.zeno>   lay the file out the way Zeno lays programs");
     println!("                            out. Several files can be named, and a");
     println!("                            folder stands for the files in it");
+    println!("  zeno convert <file.py>    write a program of Python again as Zeno, in a");
+    println!("                            `.zeno` file beside it. What cannot be said in");
+    println!("                            Zeno is kept as Python, in an `inline python`");
+    println!("                            block, and every piece is reported");
+    println!("                            (docs/convert.md)");
     println!("  zeno lsp                  the language server: an editor starts this to");
     println!("                            show mistakes as you type (docs/lsp.md)");
     println!("  zeno playground           write `playground.html`: a page to write Zeno");
@@ -1776,6 +1784,7 @@ fn main() -> ExitCode {
             }
         }
         Some("lsp") => lsp::run(),
+        Some("convert") => convert::command(&args[1..]),
         Some("playground") => match playground() {
             Some(()) => ExitCode::SUCCESS,
             None => ExitCode::FAILURE,
