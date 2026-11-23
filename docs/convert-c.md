@@ -228,7 +228,8 @@ Windows, which it does not follow), pointers 64.
 | `unsigned char`, `uint8_t` | `u8` | Goes round at 256, as in C |
 | `unsigned short`, `uint16_t` | `u16` | Goes round at 65536 |
 | `unsigned int`, `uint32_t` | `u32` | Goes round at 2**32 |
-| `unsigned long`, `uint64_t`, `size_t` | `int` | They count and index, beside `int` on nearly every line, and Zeno's `u64` meets an `int` only through `u64( )`. So they are `int`, and what could differ is kept: `-` or `~` of one, or one beside a number that may be below zero |
+| `uint64_t`, `unsigned long`, `unsigned long long` | `u64` | Goes round at 2**64, written `u64.wrap(...)`. An `int` beside one is made a `u64` as C makes it: `u64(n)`, or `u64.wrap(n)` when it may be below zero |
+| `size_t` | `int` | It counts bytes and items, never past 2**63, and stands beside `int` on nearly every line, which a `u64` meets only through `u64( )`. What could differ is kept: `-` or `~` of one, or one beside a number that may be below zero |
 | `float` | `f32` | The same 32 bits, so the same sums |
 | `double` | `float` | The same 64 bits |
 | `long double` | Kept | More bits than any float of Zeno |
@@ -242,9 +243,11 @@ Windows, which it does not follow), pointers 64.
 
 Every sum gives what C gives:
 
-- **Unsigned** (`u8`, `u16`, `u32`): a sum that goes past the top goes
-  round, written `u8.wrap(...)`, `u32.wrap(...)`. It is written only
-  where the value is looked at or stored, so `a + b + c` is one wrap.
+- **Unsigned** (`u8`, `u16`, `u32`, `u64`): a sum that goes past the
+  top goes round, written `u8.wrap(...)` ... `u64.wrap(...)`. It is
+  written only where the value is looked at or stored, so `a + b + c`
+  is one wrap. A hash of 64 bits reads as it does in C:
+  `hash = u64.wrap(hash * FNV_PRIME)`, `h ^= u64.wrap(h << 13)`.
   A product of two `u32` that may need more than 62 bits goes through a
   helper `times_u32`, so it does not stop with `OverflowError` before
   it is cut.
@@ -406,10 +409,9 @@ at its first place of each kind, and the report lists the lines:
 - **The order C works out the arguments of one call in**: `f(next(),
   next())` is left to the compiler in C; Zeno works them out left to
   right.
-- **A 64-bit unsigned number past 2\*\*63**: `uint64_t` and `size_t`
-  are written as `int`, so a sum that goes past `int.max` stops the
-  program with `OverflowError`, where C goes on to 2\*\*64 and round.
-  Loud, never wrong, but a hash of 64 bits stops where C's goes on.
+- **A `size_t` past 2\*\*63**, or a `uint64_t` past it stored in a
+  signed `long`: both are `int` in Zeno, and stop the program with
+  `OverflowError` where C would go on. Loud, never wrong.
 - **`long` as 32 bits**, as on Windows: the converter reads it as 64.
 - **The last digit of `sin`, `cos` and the like**, which comes from
   the C library of the machine.
@@ -428,7 +430,8 @@ with `cc -std=c11` and run, converted and run with `zeno run`, and what
 the two print and the status they end with are compared. The first line
 of each says how many pieces are to be kept (`// kept: 1`). Among them
 are a ring buffer, a frame parser and a state machine as they are
-written for a board (`firmware.c`), a sieve of primes, unsigned sums at
+written for a board (`firmware.c`), a hash of 64 bits and two random
+generators (`hashes.c`), a sieve of primes, unsigned sums at
 each size, structs copied and changed, pointers to one number and
 arrays, `switch`, `printf` in parts, a `main` that reads its
 arguments, and a file with `#ifdef` that is kept whole. The GitHub workflow `convert.yml` runs them on every push

@@ -20611,7 +20611,8 @@ the two to share its local variables, which they cannot (62.3).
 |---|---|
 | `uint8_t`, `uint16_t`, `uint32_t` and the `unsigned` of the same size | `u8`, `u16`, `u32`, with `u8.wrap(...)` where C goes round |
 | The signed whole numbers | `int`, and a store into a smaller one checked (`i32(...)`) |
-| `uint64_t`, `size_t`, `unsigned long` | `int`, where the value can never be below zero; else kept |
+| `uint64_t`, `unsigned long`, `unsigned long long` | `u64`, with `u64.wrap(...)` where C goes round |
+| `size_t` | `int`, where the value can never be below zero; else kept |
 | `float`, `double` | `f32`, `float` |
 | `/`, `%` of numbers that may be below zero | `c_divide`, `c_remainder`, toward zero |
 
@@ -20620,13 +20621,20 @@ wrong by one bit is worse than none. Zeno has `u8`, `u16`, `u32` and
 `f32` (2.8, chapter 41), so the sums that matter on a board can be written
 exactly.
 
-**Why `size_t` is an `int`.** Zeno's `u64` (chapter 42) meets an `int`
-only through `u64( )`, and `size_t` counts and indexes beside `int` on
-nearly every line, so as `u64` the Zeno would be a cast on every line.
-As `int` it reads as Zeno, and the converter keeps what could differ:
-`-` or `~` of one, or one beside a number that may be below zero. A sum
-past 2\*\*63 stops with `OverflowError` where C goes on: loud, and in
-63.13.
+**Why `size_t` is an `int`, and `uint64_t` a `u64`.** Zeno's `u64`
+(chapter 42) meets an `int` only through `u64( )`. A `size_t` counts
+and indexes beside `int` on nearly every line and is never past 2\*\*63,
+so as a `u64` the Zeno would be a cast on every line for nothing; as an
+`int` it reads as Zeno, and the converter keeps what could differ (`-`
+or `~` of one, or one beside a number that may be below zero). A
+`uint64_t` is asked for where all 64 bits matter: a hash, a random
+generator, a register. So it is a `u64`, and an `int` beside one is
+made a `u64` as C makes it, `u64(n)` when it is never below zero and
+`u64.wrap(n)` when it may be, which is C's conversion exactly.
+
+**Where the wrap goes.** `u64.wrap` reaches through `+ - * <<` inside
+it (42.6) but not through `& | ^ ~`, so the sides of those are cut
+first: `h ^= u64.wrap(h << 13)`.
 
 **A wrap where it is looked at.** `a + b + c` of `u32` is one
 `u32.wrap(a + b + c)`, not three, since going round once at the end
@@ -20772,9 +20780,8 @@ stops the program (63.3), and the last line written in parts is ended
 
 What C leaves undefined (a signed overflow, an index past the end, a
 variable read before it has a value: Zeno stops on the first two, and
-gives the third 0); a 64-bit unsigned number past 2\*\*63, which stops
-the Zeno (63.2); the order C works out the arguments of one call
-in; `long` as 32 bits, as on Windows; the last digit of `sin`. Each is
+gives the third 0); a `size_t` past 2\*\*63, which stops the Zeno
+(63.2); the order C works out the arguments of one call in; `long` as 32 bits, as on Windows; the last digit of `sin`. Each is
 in `convert-c.md`.
 
 ### 63.14 How it is checked
@@ -20783,16 +20790,14 @@ As 62.19, with the C compiled by `cc -std=c11` and run: what it prints
 and the status it ends with must be what `zeno run` gives. The first
 line of each program, `// kept: N`, is how many pieces are to be kept.
 The programs are in `tools/convert/*.c`: a ring buffer, frame parser
-and state machine as they are written for a board, a sieve, unsigned
-sums at each size, structs, pointers, `switch`, `printf` in parts, a
+and state machine as they are written for a board, a hash of 64 bits
+and two random generators, a sieve, unsigned sums at each size, structs, pointers, `switch`, `printf` in parts, a
 `main` that reads its arguments, and a file the preprocessor changes.
 
 ### 63.15 Left for later
 
 - `--declare header.h`, to write the declarations of `c.library` from a
   header (62.21).
-- `uint64_t` as `u64` where it never meets an `int` (a hash, a
-  register of 64 bits), so that it goes round as C's does.
 - Pointer variables that only walk an array (`p++` over `values`), as
   an index.
 - `%e` and `%g`, as Zeno gets a way to show them.

@@ -685,6 +685,7 @@ fn write_unit(world: &World, unit: &Unit, comments: Vec<Comment>) -> Kept<Writte
             let code = w.store(v, &ty, line)?;
             let annotation = match &ty {
                 CTy::Int(IntTy { signed: false, bits: 8 | 16 | 32, .. }) | CTy::Float(true) => format!(": {}", zeno_type(&ty, line)?),
+                CTy::Int(int) if int.is_u64() => format!(": {}", zeno_type(&ty, line)?),
                 _ => String::new(),
             };
             w.line(format!("let {}{annotation} = {code}", world.zeno_name(name)));
@@ -1088,6 +1089,17 @@ mod tests {
         let done = convert("#ifdef DEBUG\nint x;\n#endif\nint main(void) { return 0; }\n", "test.c");
         assert!(done.report.whole.is_some());
         assert!(done.zeno.contains("c_part.main()"));
+    }
+
+    #[test]
+    fn a_uint64_goes_round_as_in_c() {
+        let source = "#include <stdint.h>\n#include <stddef.h>\nuint64_t mix(uint64_t h, size_t n) {\n    h ^= h << 13;\n    h *= 31;\n    return h + n;\n}\n";
+        let done = convert(source, "mix.c");
+        assert!(done.report.kept.is_empty(), "{}", done.zeno);
+        assert!(done.zeno.contains("function mix(h_given: u64, n: int) -> u64 {"), "{}", done.zeno);
+        assert!(done.zeno.contains("h ^= u64.wrap(h << 13)"), "{}", done.zeno);
+        assert!(done.zeno.contains("h = u64.wrap(h * 31)"), "{}", done.zeno);
+        assert!(done.zeno.contains("return u64.wrap(h + u64(n))"), "{}", done.zeno);
     }
 
     #[test]

@@ -79,14 +79,25 @@ pub struct IntTy {
     /// `char`, which is a whole number of 8 bits that is printed as a
     /// letter by `%c` and `putchar`.
     pub char: bool,
+    /// `size_t` and the types like it, which count bytes and items: an
+    /// unsigned number of 64 bits that Zeno writes as an `int`, since it
+    /// is never past 2**63 and stands beside `int`s (63.2). Other 64-bit
+    /// unsigned numbers are Zeno's `u64`.
+    pub count: bool,
 }
 
 impl IntTy {
-    pub const INT: IntTy = IntTy { bits: 32, signed: true, char: false };
-    pub const UINT: IntTy = IntTy { bits: 32, signed: false, char: false };
-    pub const LONG: IntTy = IntTy { bits: 64, signed: true, char: false };
-    pub const ULONG: IntTy = IntTy { bits: 64, signed: false, char: false };
-    pub const CHAR: IntTy = IntTy { bits: 8, signed: true, char: true };
+    pub const INT: IntTy = IntTy { bits: 32, signed: true, char: false, count: false };
+    pub const UINT: IntTy = IntTy { bits: 32, signed: false, char: false, count: false };
+    pub const LONG: IntTy = IntTy { bits: 64, signed: true, char: false, count: false };
+    pub const ULONG: IntTy = IntTy { bits: 64, signed: false, char: false, count: false };
+    pub const SIZE: IntTy = IntTy { bits: 64, signed: false, char: false, count: true };
+    pub const CHAR: IntTy = IntTy { bits: 8, signed: true, char: true, count: false };
+
+    /// An unsigned number of 64 bits that is not a count: Zeno's `u64`.
+    pub fn is_u64(self) -> bool {
+        self.bits == 64 && !self.signed && !self.count
+    }
 
     pub fn max(self) -> u64 {
         if self.signed {
@@ -665,7 +676,7 @@ pub struct Names {
 /// The type names of `<stdint.h>` and `<stddef.h>`, which a file uses
 /// without a declaration the converter can see.
 fn known_type(name: &str) -> Option<CTy> {
-    let int = |bits, signed| Some(CTy::Int(IntTy { bits, signed, char: false }));
+    let int = |bits, signed| Some(CTy::Int(IntTy { bits, signed, char: false, count: false }));
     match name {
         "int8_t" => int(8, true),
         "int16_t" => int(16, true),
@@ -674,7 +685,8 @@ fn known_type(name: &str) -> Option<CTy> {
         "uint8_t" => int(8, false),
         "uint16_t" => int(16, false),
         "uint32_t" => int(32, false),
-        "uint64_t" | "size_t" | "uintptr_t" | "uintmax_t" => int(64, false),
+        "uint64_t" | "uintmax_t" => int(64, false),
+        "size_t" | "uintptr_t" => Some(CTy::Int(IntTy::SIZE)),
         _ => None,
     }
 }
@@ -867,14 +879,14 @@ impl<'a> Parser<'a> {
             }
             ty
         } else {
-            let int = |bits| CTy::Int(IntTy { bits, signed: signed.unwrap_or(true), char: false });
+            let int = |bits| CTy::Int(IntTy { bits, signed: signed.unwrap_or(true), char: false, count: false });
             match base {
                 Some("void") => CTy::Void,
                 Some("bool") => CTy::Bool,
                 Some("float") => CTy::Float(true),
                 Some("double") if longs > 0 => return keep(line, "a `long double`, which has more bits than any float of Zeno"),
                 Some("double") => CTy::Float(false),
-                Some("char") => CTy::Int(IntTy { bits: 8, signed: signed.unwrap_or(true), char: signed.is_none() }),
+                Some("char") => CTy::Int(IntTy { bits: 8, signed: signed.unwrap_or(true), char: signed.is_none(), count: false }),
                 _ if short => int(16),
                 _ if longs > 0 => int(64),
                 Some("int") => int(32),

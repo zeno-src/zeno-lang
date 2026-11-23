@@ -312,7 +312,12 @@ impl Val {
 }
 
 fn is_sized(ty: &CTy) -> bool {
-    matches!(ty, CTy::Int(IntTy { signed: false, bits: 8 | 16 | 32, .. }) | CTy::Float(true))
+    matches!(ty, CTy::Int(IntTy { signed: false, bits: 8 | 16 | 32, .. }) | CTy::Float(true)) || is_u64(ty)
+}
+
+/// A `uint64_t`, an `unsigned long`: Zeno's `u64`.
+fn is_u64(ty: &CTy) -> bool {
+    matches!(ty, CTy::Int(int) if int.is_u64())
 }
 
 /// `code` in brackets when it binds more loosely than `prec`.
@@ -330,6 +335,7 @@ pub fn zeno_type(ty: &CTy, line: usize) -> Kept<String> {
         CTy::Int(IntTy { signed: false, bits: 8, .. }) => "u8".into(),
         CTy::Int(IntTy { signed: false, bits: 16, .. }) => "u16".into(),
         CTy::Int(IntTy { signed: false, bits: 32, .. }) => "u32".into(),
+        CTy::Int(int) if int.is_u64() => "u64".into(),
         CTy::Int(_) => "int".into(),
         CTy::Float(true) => "f32".into(),
         CTy::Float(false) => "float".into(),
@@ -345,6 +351,13 @@ pub fn zeno_type(ty: &CTy, line: usize) -> Kept<String> {
 /// The type of C a usual sum of two whole numbers has (C 6.3.1.8).
 fn usual(a: IntTy, b: IntTy) -> IntTy {
     let (a, b) = (a.promoted(), b.promoted());
+    // A `size_t` beside a `uint64_t` is the `uint64_t`: the one Zeno
+    // holds in all 64 bits.
+    if a.is_u64() || b.is_u64() {
+        if a.bits == 64 && b.bits == 64 && !(a.signed && b.signed) || a.is_u64() && b.bits < 64 || b.is_u64() && a.bits < 64 {
+            return IntTy::ULONG;
+        }
+    }
     if a.signed == b.signed {
         return if a.bits >= b.bits { a } else { b };
     }
@@ -532,6 +545,55 @@ impl<'a> W<'a> {
         Val { ty: CTy::Int(to), ..v }
     }
 
+    /// `v` as a `u64` of Zeno, as C converts a whole number to a
+    /// `uint64_t`. A sum of u64s need not be cut yet: `u64.wrap` around
+    /// the whole of it, where it is looked at, cuts it (42.6).
+    fn to_u64(&mut self, v: Val) -> Val {
+        let from = v.int().unwrap_or(IntTy::INT);
+        if from.is_u64() {
+            return v;
+        }
+        if v.literal {
+            return Val { ty: CTy::Int(IntTy::ULONG), sized: true, ..v };
+        }
+        let v = self.exact(v);
+        let code = if v.nonneg || !from.signed { format!("u64({})", v.code) } else { format!("u64.wrap({})", v.code) };
+        Val { exact: true, nonneg: true, sized: true, literal: false, ..Val::new(code, ATOM, CTy::Int(IntTy::ULONG)) }
+    }
+
+    /// A sum of two whole numbers that C works out as `uint64_t`s.
+    fn arith_u64(&mut self, op: &'static str, l: Val, r: Val) -> Val {
+        let prec = prec_of(op);
+        let zop = if op == "/" { "//" } else { op };
+        let (mut l, r, exact) = match op {
+            "<<" | ">>" => {
+                let l = self.to_u64(l);
+                let l = if op == ">>" { self.exact(l) } else { l };
+                let r = self.exact(r);
+                // The count of a shift is an int.
+                let r = if r.int().is_some_and(|int| int.is_u64()) { Val { value: r.value, ..Val::new(format!("int({})", r.code), ATOM, CTy::Int(IntTy::INT)) } } else { r };
+                (l, r, op == ">>")
+            }
+            "/" | "%" => {
+                let (l, r) = (self.to_u64(l), self.to_u64(r));
+                (self.exact(l), self.exact(r), true)
+            }
+            // `u64.wrap` reaches through `+ - * <<` inside it, and not
+            // through the operators on bits: their sides are cut first.
+            "&" | "|" | "^" => {
+                let (l, r) = (self.to_u64(l), self.to_u64(r));
+                (self.exact(l), self.exact(r), true)
+            }
+            _ => (self.to_u64(l), self.to_u64(r), false),
+        };
+        // Two numbers written out are an int in Zeno: one is made a u64.
+        if l.literal && (r.literal || op == "<<" || op == ">>") {
+            l = Val { literal: false, ..Val::new(format!("u64({})", l.code), ATOM, CTy::Int(IntTy::ULONG)) };
+        }
+        let code = format!("{} {zop} {}", paren(&l, prec), paren(&r, prec + 1));
+        Val { exact, nonneg: true, sized: true, ..Val::new(code, prec, CTy::Int(IntTy::ULONG)) }
+    }
+
     pub fn expr(&mut self, e: &Expr) -> Kept<Val> {
         let line = e.line;
         match &e.kind {
@@ -589,13 +651,13 @@ impl<'a> W<'a> {
             E::Member(base, field, arrow) => self.member(base, field, *arrow, line),
             E::Cast(ty, operand) => self.cast(ty, operand, line),
             E::SizeofType(ty) => match size_of(ty) {
-                Some(size) => Ok(Val { nonneg: true, value: Some(size as i128), literal: true, ..Val::new(size.to_string(), ATOM, CTy::Int(IntTy::ULONG)) }),
+                Some(size) => Ok(Val { nonneg: true, value: Some(size as i128), literal: true, ..Val::new(size.to_string(), ATOM, CTy::Int(IntTy::SIZE)) }),
                 None => keep(line, format!("`sizeof` of `{}`", ty.c_name())),
             },
             E::SizeofExpr(operand) => {
                 let v = self.expr(operand)?;
                 match size_of(&v.ty) {
-                    Some(size) => Ok(Val { nonneg: true, value: Some(size as i128), literal: true, ..Val::new(size.to_string(), ATOM, CTy::Int(IntTy::ULONG)) }),
+                    Some(size) => Ok(Val { nonneg: true, value: Some(size as i128), literal: true, ..Val::new(size.to_string(), ATOM, CTy::Int(IntTy::SIZE)) }),
                     None => keep(line, "`sizeof` of a value whose size the converter does not know"),
                 }
             }
@@ -701,8 +763,20 @@ impl<'a> W<'a> {
                         if op == "+" {
                             return Ok(Val { ty: CTy::Int(ty), ..v });
                         }
+                        if ty.is_u64() {
+                            // A number written out is an int in Zeno by itself.
+                            let v = if v.literal { Val { literal: false, ..Val::new(format!("u64({})", v.code), ATOM, CTy::Int(ty)) } } else { v };
+                            // `-x` is `0 - x`, cut where it is looked at.
+                            let (code, prec, exact) = if op == "-" {
+                                (format!("0 - {}", paren(&v, ADD + 1)), ADD, false)
+                            } else {
+                                let v = self.exact(v);
+                                (format!("~{}", paren(&v, UNARY)), UNARY, true)
+                            };
+                            return Ok(Val { exact, nonneg: true, sized: true, ..Val::new(code, prec, CTy::Int(ty)) });
+                        }
                         if !ty.signed && ty.bits == 64 {
-                            return keep(line, format!("`{op}` of a 64-bit unsigned number, which goes round at 2**64 in C"));
+                            return keep(line, format!("`{op}` of a `size_t`, which goes round at 2**64 in C"));
                         }
                         let bits = bits_of(&v) + 1;
                         let v = if ty.signed { self.exact(v) } else { v };
@@ -780,7 +854,7 @@ impl<'a> W<'a> {
         // `sizeof values / sizeof values[0]` is how many items it has.
         if op == "/" {
             if let Some((array, count)) = self.length_of(left, right) {
-                return Ok(Val { nonneg: true, value: Some(count as i128), ..Val::new(format!("len({array})"), ATOM, CTy::Int(IntTy::ULONG)) });
+                return Ok(Val { nonneg: true, value: Some(count as i128), ..Val::new(format!("len({array})"), ATOM, CTy::Int(IntTy::SIZE)) });
             }
         }
         if op == "&&" || op == "||" {
@@ -833,6 +907,9 @@ impl<'a> W<'a> {
                 if !matches!(l.ty, CTy::Int(_) | CTy::Float(_)) || !matches!(r.ty, CTy::Int(_) | CTy::Float(_)) {
                     return keep(line, "a number compared with a value that is not one");
                 }
+                if !double && (is_u64(&l.ty) || is_u64(&r.ty)) {
+                    return keep(line, "a 64-bit unsigned number beside a `float` of 32 bits");
+                }
                 let l = self.float_side(l, double);
                 let r = self.float_side(r, double);
                 Ok(both(&l, &r))
@@ -850,6 +927,10 @@ impl<'a> W<'a> {
     /// compares, in the type `ty`.
     fn int_sides(&mut self, l: Val, r: Val, ty: IntTy, line: usize) -> Kept<(Val, Val)> {
         if ty.signed {
+            return Ok((self.exact(l), self.exact(r)));
+        }
+        if ty.is_u64() {
+            let (l, r) = (self.to_u64(l), self.to_u64(r));
             return Ok((self.exact(l), self.exact(r)));
         }
         if ty.bits == 64 {
@@ -871,6 +952,10 @@ impl<'a> W<'a> {
             (CTy::Float(true), true) => {
                 let inner = if v.sized { v.code.clone() } else { format!("f32({})", v.code) };
                 Val { sized: false, single_literal: false, ..Val::new(format!("float({inner})"), ATOM, CTy::Float(false)) }
+            }
+            (CTy::Int(int), _) if int.is_u64() => {
+                let v = self.exact(v);
+                Val::new(format!("float({})", v.code), ATOM, CTy::Float(false))
             }
             (CTy::Int(_), _) => self.exact(v),
             _ => v,
@@ -913,9 +998,12 @@ impl<'a> W<'a> {
             let code = format!("{} {zop} {}", paren(&l, prec), paren(&r, prec + 1));
             return Ok(Val { value, nonneg, ..Val::new(code, prec, CTy::Int(ty)) });
         }
+        if ty.is_u64() {
+            return Ok(self.arith_u64(op, l, r));
+        }
         if ty.bits == 64 {
             if op == "-" {
-                return keep(line, "`-` of 64-bit unsigned numbers (`size_t`, `unsigned long`), which go round at 2**64 in C; Zeno's whole numbers do not");
+                return keep(line, "`-` of `size_t`s, which go round at 2**64 in C; Zeno's `int` does not");
             }
             let (l, r) = if shift { (self.exact(l), self.exact(r)) } else { self.int_sides(l, r, ty, line)? };
             let code = format!("{} {zop} {}", paren(&l, prec), paren(&r, prec + 1));
@@ -981,6 +1069,9 @@ impl<'a> W<'a> {
         }
         let double = matches!(l.ty, CTy::Float(false)) || matches!(r.ty, CTy::Float(false));
         let prec = prec_of(op);
+        if !double && (is_u64(&l.ty) || is_u64(&r.ty)) {
+            return keep(line, "a 64-bit unsigned number in a sum of `float`s of 32 bits");
+        }
         if double {
             let l = self.float_side(l, true);
             let r = self.float_side(r, true);
@@ -1001,7 +1092,15 @@ impl<'a> W<'a> {
         let Some(at_ty) = at.int() else {
             return keep(line, "an index that is not a whole number");
         };
-        let at = if at_ty.signed { self.exact(at) } else { let at = self.as_unsigned(at, at_ty.promoted()); self.exact(at) };
+        let at = if at_ty.signed {
+            self.exact(at)
+        } else if at_ty.is_u64() {
+            let at = self.exact(at);
+            Val::new(format!("int({})", at.code), ATOM, CTy::Int(IntTy::LONG))
+        } else {
+            let at = self.as_unsigned(at, at_ty.promoted());
+            self.exact(at)
+        };
         // `text[i]` of a text is the code of a letter.
         if let E::Name(name) = &base.kind {
             if let Some(local) = self.lookup(name).cloned() {
@@ -1065,8 +1164,8 @@ impl<'a> W<'a> {
                 if !to.signed && to.bits <= 32 {
                     // C converts to an unsigned type by keeping the low bits:
                     // the value need not be exact until it is looked at.
-                    if let CTy::Int(_) = v.ty {
-                        if to.bits == 32 {
+                    if let CTy::Int(from) = v.ty {
+                        if to.bits == 32 && !from.is_u64() {
                             return Ok(self.as_unsigned(v, to));
                         }
                     }
@@ -1100,6 +1199,13 @@ impl<'a> W<'a> {
                 };
                 let from = v.int().unwrap();
                 let fits_value = v.value.is_some_and(|value| value >= t.min() as i128 && value <= t.max() as i128);
+                if !t.signed && t.bits <= 32 && from.is_u64() {
+                    // A u64 is cut to the low bits first: Zeno's `u32.wrap`
+                    // takes an int, and a u64 may be past `int.max`.
+                    let v = self.exact(v);
+                    let mask = t.max();
+                    return Ok(Val { exact: true, sized: true, nonneg: true, ..Val::new(format!("u{}(int({} & {mask:#x}))", t.bits, paren(&v, BAND + 1)), ATOM, to.clone()) });
+                }
                 if !t.signed && t.bits <= 32 {
                     let width = format!("u{}", t.bits);
                     let same = !from.signed && from.bits == t.bits;
@@ -1113,7 +1219,19 @@ impl<'a> W<'a> {
                     let code = if fits { format!("{width}({})", v.code) } else { format!("{width}.wrap({})", v.code) };
                     return Ok(Val { exact: true, sized: true, nonneg: true, ..Val::new(code, ATOM, to.clone()) });
                 }
+                if t.is_u64() {
+                    let v = self.to_u64(v);
+                    let v = self.exact(v);
+                    return Ok(Val { ty: to.clone(), sized: true, nonneg: true, ..v });
+                }
                 let v = self.exact(v);
+                // A u64 stored in an int of Zeno: `int( )` stops the program
+                // past `int.max`, where C would keep the low bits.
+                let (v, from) = if from.is_u64() {
+                    (Val { nonneg: true, ..Val::new(format!("int({})", v.code), ATOM, CTy::Int(IntTy::LONG)) }, IntTy::LONG)
+                } else {
+                    (v, from)
+                };
                 if !t.signed {
                     // 64 bits, which Zeno holds in an int.
                     if from.signed && !v.nonneg && !fits_value {
@@ -1131,6 +1249,13 @@ impl<'a> W<'a> {
             CTy::Float(single) => {
                 let single = *single;
                 match &v.ty {
+                    CTy::Int(from) if from.is_u64() => {
+                        if single {
+                            return keep(line, "a 64-bit unsigned number stored in a `float` of 32 bits");
+                        }
+                        let v = self.exact(v);
+                        Ok(Val::new(format!("float({})", v.code), ATOM, to.clone()))
+                    }
                     CTy::Int(_) => {
                         let v = self.exact(v);
                         if v.literal && !v.code.starts_with("0x") && !v.code.starts_with("0o") && !v.code.starts_with("0b") {
@@ -1417,7 +1542,7 @@ impl<'a> W<'a> {
                     if !v.ty.is_text() {
                         return keep(line, "`strlen` of a value that is not a text");
                     }
-                    Ok(Val { nonneg: true, ..Val::new(format!("len({})", v.code), ATOM, CTy::Int(IntTy::ULONG)) })
+                    Ok(Val { nonneg: true, ..Val::new(format!("len({})", v.code), ATOM, CTy::Int(IntTy::SIZE)) })
                 }
                 "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower" | "toupper" | "tolower" => {
                     let v = one(self, args)?;
@@ -1501,6 +1626,14 @@ impl<'a> W<'a> {
     }
 
     pub fn statement(&mut self, stmt: &Stmt) -> Kept<()> {
+        self.one_statement(stmt)?;
+        // A variable given to a call through a pointer has its value put
+        // back before the next statement, whatever this one was.
+        self.flush_post();
+        Ok(())
+    }
+
+    fn one_statement(&mut self, stmt: &Stmt) -> Kept<()> {
         let line = stmt.line;
         self.comments_before(line);
         match &stmt.kind {
@@ -1975,6 +2108,9 @@ impl<'a> W<'a> {
             } else {
                 w.line(format!("print({text})"));
             }
+            // What a call gave back through a pointer is put back before
+            // the next statement reads it.
+            w.flush_post();
         };
         match name {
             "printf" | "fprintf" => {
@@ -2004,6 +2140,7 @@ impl<'a> W<'a> {
                     self.imports.insert("program");
                     self.flush_pre();
                     self.line(format!("program.warn({text})"));
+                    self.flush_post();
                     return Ok(());
                 }
                 if !buffered {
@@ -2186,6 +2323,9 @@ impl<'a> W<'a> {
                     }
                     let signed_conversion = conversion == 'd' || conversion == 'i';
                     let v = if signed_conversion {
+                        if promoted.is_u64() {
+                            return keep(line, format!("a `{}` shown with `%l{conversion}`, which shows a large one below zero", v.ty.c_name()));
+                        }
                         if !promoted.signed && promoted.bits == 32 && !v.nonneg {
                             return keep(line, "an `unsigned int` shown with `%d`, which shows a large one below zero");
                         }
