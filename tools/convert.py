@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Check `zeno convert` on the programs of Python in tools/convert.
+"""Check `zeno convert` on the programs of Python and C in tools/convert.
 
-Each program is converted, and then both are run: `python3 x.py` and
-`zeno run x.zeno`. What the two print must be the same. A program whose
-notes say that Zeno shows something otherwise has a file `x.expect`
-beside it with what Zeno prints, and that is what is compared.
+Each program is converted, and then both are run: `python3 x.py`, or the
+C built with `cc` and run, and `zeno run x.zeno`. What the two print must
+be the same, and they must end with the same code. A program whose notes
+say that Zeno shows something otherwise has a file `x.expect` beside it
+with what Zeno prints, and that is what is compared.
 
-The first line of each program says how many of its pieces are kept as
-Python (`# kept: 2`), so that a rule that stops working is seen.
+The first line of each program says how many of its pieces are kept
+(`# kept: 2` in Python, `// kept: 2` in C), so that a rule that stops
+working is seen.
 
     python3 tools/convert.py                 every program
-    python3 tools/convert.py lists texts     these ones
+    python3 tools/convert.py lists swap.c    these ones (Python unless `.c` is said)
     python3 tools/convert.py --write-expect  write the `.expect` files anew
 """
 
@@ -30,20 +32,28 @@ def run(command, folder):
     return done.returncode, done.stdout, done.stderr
 
 
-def check(name, write_expect):
-    source = os.path.join(PROGRAMS, name + ".py")
+def check(file_name, write_expect):
+    name, kind = os.path.splitext(file_name)
+    language = "C" if kind == ".c" else "Python"
+    source = os.path.join(PROGRAMS, file_name)
     with open(source, encoding="utf-8") as file:
         text = file.read()
     with tempfile.TemporaryDirectory() as folder:
-        with open(os.path.join(folder, name + ".py"), "w", encoding="utf-8") as file:
+        with open(os.path.join(folder, file_name), "w", encoding="utf-8") as file:
             file.write(text)
-        code, report, errors = run([ZENO, "convert", name + ".py"], folder)
+        code, report, errors = run([ZENO, "convert", file_name], folder)
         if code != 0:
             return f"`zeno convert` failed:\n{report}{errors}"
-        wanted = re.match(r"# kept: (\d+|all)", text)
-        found = re.search(r"(\d+) kept as Python", report)
+        wanted = re.match(r"(?:#|//) kept: (\d+|all)", text)
+        found = re.search(r"(\d+) kept as " + language, report)
         kept = "all" if "The whole file is kept" in report else (found.group(1) if found else "?")
-        _, python_out, python_err = run([sys.executable, name + ".py"], folder)
+        if language == "C":
+            built, _, build_err = run(["cc", "-std=c11", "-O1", "-o", name, file_name, "-lm"], folder)
+            if built != 0:
+                return f"the C does not build:\n{build_err}"
+            first_code, python_out, python_err = run([os.path.join(folder, name)], folder)
+        else:
+            first_code, python_out, python_err = run([sys.executable, file_name], folder)
         code, zeno_out, zeno_err = run([ZENO, "run", name + ".zeno"], folder)
         with open(os.path.join(folder, name + ".zeno"), encoding="utf-8") as file:
             zeno_text = file.read()
@@ -64,9 +74,9 @@ def check(name, write_expect):
             problems.append(f"{kept} pieces kept, and its first line says {wanted.group(1)}\n{report}")
         if not wanted:
             problems.append("its first line does not say `# kept: N`")
-        if code != 0 or zeno_out != python_out:
+        if code != first_code or zeno_out != python_out:
             problems.append(
-                "the two do not print the same\n--- python3\n"
+                f"the two do not print the same, or end otherwise ({first_code} and {code})\n--- {language}\n"
                 + python_out + python_err[-600:] + "--- zeno run\n" + zeno_out + zeno_err[-1200:] + "--- the Zeno\n" + zeno_text
             )
         return "\n".join(problems)
@@ -75,7 +85,8 @@ def check(name, write_expect):
 def main():
     args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     write_expect = "--write-expect" in sys.argv
-    names = args or sorted(name[:-3] for name in os.listdir(PROGRAMS) if name.endswith(".py"))
+    names = [arg if arg.endswith(".c") or arg.endswith(".py") else arg + ".py" for arg in args]
+    names = names or sorted(name for name in os.listdir(PROGRAMS) if name.endswith(".py") or name.endswith(".c"))
     failed = 0
     for name in names:
         problem = check(name, write_expect)

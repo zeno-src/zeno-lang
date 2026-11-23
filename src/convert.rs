@@ -14,7 +14,9 @@
 //!   runs, and the work left is to make the block smaller.
 //!
 //! This file is the command and the report. Reading Python is
-//! `convert_python.rs`, and writing Zeno from it `convert_python_write.rs`.
+//! `convert_python.rs`, and writing Zeno from it `convert_python_write.rs`;
+//! reading C is `convert_c.rs`, and writing Zeno from it
+//! `convert_c_write.rs` and `convert_c_lines.rs`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -39,6 +41,12 @@ pub enum Note {
     Half,
     /// A variable that began as a whole number and holds a float later.
     FloatStart,
+    /// C: a whole number stored in a smaller type is checked, not cut.
+    Narrow,
+    /// C: the last line written in parts gets a line end.
+    LastLine,
+    /// C: `argv[0]` is the name of the file, not the path it was run by.
+    ProgramName,
 }
 
 impl Note {
@@ -77,6 +85,20 @@ impl Note {
                 format!("convert: `{name}` is a float from its first value, since it holds a float"),
                 "later. In Python it is a whole number until then, and is printed as one.".to_string(),
             ],
+            Note::Narrow => vec![
+                "convert: a whole number stored in a `char`, a `short` or an `int` that it does".to_string(),
+                "not fit stops the program with `OverflowError` here, where C would keep the bits".to_string(),
+                "that fit.".to_string(),
+            ],
+            Note::LastLine => vec![
+                "convert: what the program writes in parts of lines waits in `line_so_far` until".to_string(),
+                "its line ends. A last line the C left without its end is given one.".to_string(),
+            ],
+            Note::ProgramName => vec![
+                format!("convert: `argv[0]` is \"{name}\", the name of the C file without `.c`, where C"),
+                "gives the path the program was started by. The words after it are the ones the".to_string(),
+                "program is given.".to_string(),
+            ],
         }
     }
 
@@ -90,6 +112,9 @@ impl Note {
             Note::Letters => "`upper` and `lower` change a to z only",
             Note::Half => "`math.round` takes a half away from zero",
             Note::FloatStart => "a variable is a float from its first value",
+            Note::Narrow => "a number that does not fit a smaller type stops the program",
+            Note::LastLine => "the last line written in parts is ended",
+            Note::ProgramName => "`argv[0]` is the name of the file",
         }
     }
 }
@@ -118,6 +143,8 @@ pub struct Report {
     pub whole: Option<String>,
     /// Things the kept pieces do that a block does otherwise.
     pub warnings: Vec<String>,
+    /// The language the file was in: `Python`, `C`.
+    pub language: &'static str,
 }
 
 pub struct Converted {
@@ -129,18 +156,20 @@ impl Report {
     /// The report as `zeno convert` prints it.
     pub fn text(&self, from: &str, to: &str) -> String {
         let mut out = format!("Wrote {to} from {from}.\n");
+        let language = if self.language.is_empty() { "Python" } else { self.language };
+        let block = language.to_ascii_lowercase();
         if let Some(why) = &self.whole {
-            out.push_str(&format!("  The whole file is kept as Python, in one `inline python` block: {why}.\n"));
+            out.push_str(&format!("  The whole file is kept as {language}, in one `inline {block}` block: {why}.\n"));
             return out;
         }
         let kept = self.kept.len();
         let zeno = self.pieces.saturating_sub(kept);
         let noted_lines: std::collections::BTreeSet<usize> = self.noted.iter().map(|(_, line)| *line).collect();
         let pieces = if self.pieces == 1 { "1 piece".to_string() } else { format!("{} pieces", self.pieces) };
-        out.push_str(&format!("  {pieces}: {zeno} written as Zeno, {kept} kept as Python.\n"));
+        out.push_str(&format!("  {pieces}: {zeno} written as Zeno, {kept} kept as {language}.\n"));
         if !self.noted.is_empty() {
             let places = if noted_lines.len() == 1 { "1 line".to_string() } else { format!("{} lines", noted_lines.len()) };
-            out.push_str(&format!("\n  Where Zeno does otherwise than Python ({places}; each kind has a `# convert:` comment at its first):\n"));
+            out.push_str(&format!("\n  Where Zeno does otherwise than {language} ({places}; each kind has a `# convert:` comment at its first):\n"));
             let mut kinds: Vec<Note> = self.noted.iter().map(|(note, _)| *note).collect();
             kinds.sort();
             kinds.dedup();
@@ -151,7 +180,7 @@ impl Report {
             }
         }
         if !self.kept.is_empty() {
-            out.push_str("\n  Kept as Python, in the `inline python` block:\n");
+            out.push_str(&format!("\n  Kept as {language}, in the `inline {block}` block:\n"));
             for piece in &self.kept {
                 let at = if piece.at == piece.line { String::new() } else { format!(" (line {})", piece.at) };
                 out.push_str(&format!("    line {}, {}: {}{at}\n", piece.line, piece.what, piece.why));
@@ -189,7 +218,7 @@ pub fn zeno_text(value: &str, quote: char) -> Option<String> {
 }
 
 fn usage() {
-    eprintln!("zeno: `convert` needs a file of Python, e.g. `zeno convert report.py`");
+    eprintln!("zeno: `convert` needs a file of Python or of C, e.g. `zeno convert report.py`");
     eprintln!("      It writes `report.zeno` beside it, and says what it did with each piece.");
     eprintln!("        --to <file.zeno>   write this file in place of that one");
     eprintln!("        --replace          write the file though it is there already");
@@ -229,14 +258,14 @@ pub fn command(args: &[String]) -> ExitCode {
     };
     let path = Path::new(&file);
     let kind = path.extension().and_then(|kind| kind.to_str()).unwrap_or("");
-    if kind != "py" {
+    if kind != "py" && kind != "c" {
         let hint = match kind {
-            "c" | "h" => " C is the next language it is to read",
-            "js" | "ts" | "java" => " Python is the first language it reads; this one is to come",
+            "h" => " A header has no program in it: convert the `.c` file that includes it",
+            "js" | "ts" | "java" => " Python and C are the languages it reads; this one is to come",
             "zeno" => " This file is Zeno already",
             _ => "",
         };
-        eprintln!("zeno: `convert` reads a file of Python, whose name ends in `.py`, and `{file}` is not one.{hint}");
+        eprintln!("zeno: `convert` reads a file of Python or of C, whose name ends in `.py` or `.c`, and `{file}` is not one.{hint}");
         return ExitCode::FAILURE;
     }
     let source = match std::fs::read_to_string(path) {
@@ -253,14 +282,18 @@ pub fn command(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| file.clone());
-    let converted = crate::convert_python_write::convert(&source, &name);
+    let converted = if kind == "c" { crate::convert_c_write::convert(&source, &name) } else { crate::convert_python_write::convert(&source, &name) };
     if let Err(error) = std::fs::write(&to, &converted.zeno) {
         eprintln!("zeno: cannot write `{to}`: {error}");
         return ExitCode::FAILURE;
     }
     print!("{}", converted.report.text(&file, &to));
     println!();
-    println!("  Run it with `zeno run {to}`. It prints what `python3 {file}` prints,");
+    if kind == "c" {
+        println!("  Run it with `zeno run {to}`. It prints what the C program prints,");
+    } else {
+        println!("  Run it with `zeno run {to}`. It prints what `python3 {file}` prints,");
+    }
     println!("  but for the notes above.");
     ExitCode::SUCCESS
 }

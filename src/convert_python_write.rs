@@ -2570,7 +2570,7 @@ pub fn convert(source: &str, file: &str) -> Converted {
             .iter()
             .filter_map(|unit| unit.kept.as_ref().map(|(at, why)| KeptPiece { line: unit.piece.line, what: unit.label.clone(), at: *at, why: why.clone() }))
             .collect();
-        let report = Report { pieces: units.len(), noted, kept, whole: None, warnings: Vec::new() };
+        let report = Report { pieces: units.len(), noted, kept, whole: None, warnings: Vec::new(), language: "Python" };
         return Converted { zeno, report };
     }
 }

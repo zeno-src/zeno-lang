@@ -20559,9 +20559,10 @@ unless it is told `--replace` or given `--to`.
 
 ### 62.21 Left for later
 
-- **C** next: a file of C written as Zeno, what it cannot read left in
-  an `inline c` block, and `--declare header.h` to write the
-  declarations of `c.library` from a header.
+- ~~**C** next: a file of C written as Zeno, what it cannot read left in
+  an `inline c` block~~: **done**, chapter 63. Still left:
+  `--declare header.h`, to write the declarations of `c.library` from a
+  header.
 - **A list or dict given to a function of the block** where the Zeno
   never uses it again after the call, which would be safe.
 - **`lambda`, functions inside functions, tuples as values**, as Zeno
@@ -20575,3 +20576,232 @@ unless it is told `--replace` or given `--to`.
 `convert`. `convert_python_values.rs`: `expr` and the rest of an
 expression. `convert_python_lines.rs`: `statement`, `for_loop`,
 `function`, `class`.
+
+## 63. A file of C written again as Zeno: `zeno convert`
+
+The second language of chapter 62, as Partha asked: C after Python.
+[`convert-c.md`](convert-c.md) is the walkthrough.
+
+```sh
+zeno convert meter.c       # writes meter.zeno, and says what it did
+```
+
+Everything in chapter 62 that is not about Python holds for C as it
+is: one promise, never silently wrong (62.1); inside `zeno`, read by
+hand (62.2); one block; Zeno's checker has the last word (62.9); notes
+once for each kind (62.10); a new command that changes nothing else
+(62.20). This chapter is what C needs besides.
+
+### 63.1 Pieces are declarations, and a function is Zeno or C
+
+**The rule.** The file is cut at each `;` outside braces, at the `}`
+that ends a function, and at each line of the preprocessor. A function
+is written as Zeno whole, or kept as C whole.
+
+**Why.** A C file is a list of declarations, and that is what a reader
+of C sees as one thing. Half a function in each language would need
+the two to share its local variables, which they cannot (62.3).
+
+### 63.2 The numbers are C's, bit for bit
+
+**The rule.** Each type is read as C reads it on a 64-bit machine
+(LP64: `int` 32 bits, `long` 64), and every sum gives what C gives:
+
+| C | Zeno |
+|---|---|
+| `uint8_t`, `uint16_t`, `uint32_t` and the `unsigned` of the same size | `u8`, `u16`, `u32`, with `u8.wrap(...)` where C goes round |
+| The signed whole numbers | `int`, and a store into a smaller one checked (`i32(...)`) |
+| `uint64_t`, `size_t`, `unsigned long` | `int`, where the value can never be below zero; else kept |
+| `float`, `double` | `f32`, `float` |
+| `/`, `%` of numbers that may be below zero | `c_divide`, `c_remainder`, toward zero |
+
+**Why.** A converter for a firmware engineer's C that gets a checksum
+wrong by one bit is worse than none. Zeno has `u8`, `u16`, `u32` and
+`f32` (2.8, chapter 41), so the sums that matter on a board can be written
+exactly.
+
+**Why `size_t` is an `int`.** Zeno's `u64` (chapter 42) meets an `int`
+only through `u64( )`, and `size_t` counts and indexes beside `int` on
+nearly every line, so as `u64` the Zeno would be a cast on every line.
+As `int` it reads as Zeno, and the converter keeps what could differ:
+`-` or `~` of one, or one beside a number that may be below zero. A sum
+past 2\*\*63 stops with `OverflowError` where C goes on: loud, and in
+63.13.
+
+**A wrap where it is looked at.** `a + b + c` of `u32` is one
+`u32.wrap(a + b + c)`, not three, since going round once at the end
+gives the same bits as going round at each step, as long as the sum
+fits in 64 bits. A product of two `u32` may not, so it goes through
+`times_u32`, which cuts each half first.
+
+**Not chosen.** Writing `int` for every whole number and leaving the
+sizes to the reader: most of the C worth converting is about sizes.
+
+### 63.3 Signed overflow is loud, not cut
+
+**The rule.** A signed sum C would carry past the top, or store into a
+smaller type, stops the Zeno with `OverflowError`. The report has a
+note where a store is checked.
+
+**Why.** C leaves a signed overflow undefined, so no answer is C's.
+Stopping says so. Cutting the bits would pick one compiler's answer and
+hide it.
+
+### 63.4 `printf` as an f-string, and a line held until it ends
+
+**The rule.** A `printf` with a format written out is an f-string; each
+conversion that Zeno shows the same (`%d`, `%5d`, `%-5d`, `%05d`, `%x`,
+`%X`, `%.2f`, `%s`, `%-10s`, `%c`) is written, and one it does not
+(`%e`, `%g`, `%o`, `%p`, `%+d`) keeps the piece. When any line is
+written in parts, every line goes through `write_text`, which holds a
+line until its `\n` comes, and `finish_text()` ends the last.
+
+**Why.** Zeno's `print` writes whole lines. A program that writes in
+parts must be written so that the lines come out as they did, and one
+helper for every line keeps them in order. A kept C function that
+writes too would be out of order with the held line, so then the Zeno
+that writes in parts is kept.
+
+### 63.5 A struct is copied where C copies it
+
+**The rule.** A struct is a class. Where C copies one (`b = a;`, a
+struct put into an array, given to a function that changes it) the Zeno
+calls `copy()`, a method written once in the class. Where nothing can
+tell (a struct a function only reads, or gives back from where it was
+made), it is not copied.
+
+**Why.** A class is shared in Zeno where a struct is a value in C. A
+copy everywhere would be right and hard to read; a copy nowhere would
+be wrong. The converter knows which functions change which parameters,
+so it can write exactly the copies C made.
+
+### 63.6 Three kinds of pointer are written; the rest is kept
+
+**The rule.**
+
+| A pointer that | Is written as |
+|---|---|
+| is indexed (`values[i]`), or is an array parameter | a list |
+| points to one number the function writes through (`*out = ...`) | a list of one; the caller writes `let x_box = [x]`, the call, `x = x_box[0]` |
+| points to a struct (`p->x`) | the object |
+| is `const char *` | a text |
+
+A call that gives the same variable twice, or a list and a place in it,
+is kept. Every other use of a pointer is kept: a pointer variable,
+pointer sums, `NULL`, `malloc`, lists made of pointers, a pointer to a
+function.
+
+**Why.** These four are what most functions of C use pointers for: to
+give an array, to give back more than one value, to change a struct.
+Each has a Zeno form that means exactly the same. A pointer kept as a
+value (a list made of `next` pointers) has no Zeno form that would read
+as Zeno, and C does it well, so it stays C.
+
+**Why two places are kept.** `swap(&x, &x)` changes one variable in C.
+The boxes are two lists in Zeno; the second write would win, and the
+result could differ. It is rare, so it is kept rather than worked out.
+
+### 63.7 What C can call, and where a variable lives
+
+**The rule.** C can call only C: a function that a kept function calls
+is kept. A variable lives on one side: a global that a kept function
+uses is kept, and a Zeno function that uses a kept global is kept in
+turn. The Zeno calls a kept function through the block with numbers,
+floats, bools and texts C does not change; a call that would give it a
+struct, an array or a text it may change is kept.
+
+**Why.** The block is a library of C (chapter 61), and a library cannot
+call back into the program that loaded it. A global copied to both
+sides would be two variables. What crosses into the block is what the
+bridge of chapter 44 carries by value, so nothing can be changed behind
+the Zeno's back.
+
+### 63.8 What the preprocessor changes keeps the whole file
+
+**The rule.** `#include`, a `#define` of a value and `#pragma once` are
+read. Any other line of the preprocessor (`#if`, `#ifdef`, `#error`,
+`#line`) keeps the whole file as one block, with `main` called.
+
+**Why.** An `#ifdef` chooses between two programs. The converter would
+have to choose one, and the person who wrote it meant both. A `#define`
+with arguments is kept with what uses it, since Zeno has no macros.
+
+### 63.9 `main` is called at the end, with the program's arguments
+
+**The rule.** `main` is called at the end of the file. A `main` that
+may give back other than 0 ends the program with it
+(`program.exit(exit_status)`). A `main(int argc, char **argv)` is kept,
+and the block is given a few lines of C, `convert_argument` and
+`convert_main`, so the Zeno can pass it the file's name and then each
+word of `program.arguments()`. A note says `argv[0]` is the file's
+name, where C gives the path the program was started by. A `main` the
+converter cannot read is not called, and the report says so.
+
+**Why.** A C program is its `main`. Without the call the Zeno would
+print nothing, silently. The words cannot go across as one array (the
+bridge carries no array of texts), so they go one at a time, which it
+does carry.
+
+### 63.10 Kept pieces are copied with all they need
+
+**The rule.** The block has every `#include`, `#define`, macro, struct,
+enum and typedef of the file in front of the kept pieces, and the
+prototypes of kept functions. `static` is taken off a kept function so
+the Zeno can reach it.
+
+**Why.** The kept C must be compiled as it was. Copying everything that
+declares and nothing that runs is always right, and costs a few lines.
+
+### 63.11 Names, and the words of Zeno
+
+**The rule.** A name of C that is a word or a builtin of Zeno (`len`,
+`print`, `str`, `sum`, `match`) is written with a `_` after it, in the
+Zeno only; the block keeps C's names.
+
+**Why.** It is the smallest change that keeps the name readable and
+can never clash with another name of the file, which the converter
+checks.
+
+### 63.12 Notes
+
+C has two kinds: a number stored in a smaller type that does not fit
+stops the program (63.3), and the last line written in parts is ended
+(63.4); and a third for `argv[0]` (63.9).
+
+### 63.13 What is not promised
+
+What C leaves undefined (a signed overflow, an index past the end, a
+variable read before it has a value: Zeno stops on the first two, and
+gives the third 0); a 64-bit unsigned number past 2\*\*63, which stops
+the Zeno (63.2); the order C works out the arguments of one call
+in; `long` as 32 bits, as on Windows; the last digit of `sin`. Each is
+in `convert-c.md`.
+
+### 63.14 How it is checked
+
+As 62.19, with the C compiled by `cc -std=c11` and run: what it prints
+and the status it ends with must be what `zeno run` gives. The first
+line of each program, `// kept: N`, is how many pieces are to be kept.
+The programs are in `tools/convert/*.c`: a ring buffer, frame parser
+and state machine as they are written for a board, a sieve, unsigned
+sums at each size, structs, pointers, `switch`, `printf` in parts, a
+`main` that reads its arguments, and a file the preprocessor changes.
+
+### 63.15 Left for later
+
+- `--declare header.h`, to write the declarations of `c.library` from a
+  header (62.21).
+- `uint64_t` as `u64` where it never meets an `int` (a hash, a
+  register of 64 bits), so that it goes round as C's does.
+- Pointer variables that only walk an array (`p++` over `values`), as
+  an index.
+- `%e` and `%g`, as Zeno gets a way to show them.
+- `long` as 32 bits, with a flag, for C written for Windows.
+- TypeScript and JavaScript, then Java.
+
+**How it is built.** `convert_c.rs`: `lex`, `pieces`, `Parser` with
+`item`, `Names`, `IntTy`, `CTy`, `signature`. `convert_c_lines.rs`:
+`Helper`, `Kind`, `FnInfo`, `World`, `Val`, and `W` with `expr`,
+`binary`, `arith`, `call`, `output`, `format`, `statement`, `for_loop`,
+`switch`, `function`. `convert_c_write.rs`: `convert`, `spread`,
+`write_unit`, `assemble`, `takes_arguments`, `whole`.

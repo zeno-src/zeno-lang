@@ -31,6 +31,7 @@ lines of Zeno call. So what it writes always runs, prints what the
 Python printed, and the work left is to make the block smaller.
 
 The decisions behind it are chapter 62 of [`decisions.md`](decisions.md).
+For a file of C, see [`convert-c.md`](convert-c.md).
 
 ## An example
 
@@ -351,5 +352,4 @@ written as Zeno but for its `import json`. The GitHub workflow
 | `src/convert_python_lines.rs` | Writing a statement, a function and a class |
 | `tools/convert.py`, `tools/convert/` | The programs and the check |
 
-C is the next language it is to read: a file of C written as Zeno,
-with what it cannot read left in an `inline c` block.
+It reads C too: [`convert-c.md`](convert-c.md) is that walkthrough.

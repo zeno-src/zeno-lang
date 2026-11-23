@@ -1,11 +1,12 @@
 # Holds `zeno convert` to its promise: what it writes prints what the
-# Python printed, but for what the `# convert:` notes say.
+# Python or C program printed, but for what the `# convert:` notes say.
 #
-# tools/convert.py converts each program of Python in tools/convert,
-# runs `python3 x.py` and `zeno run x.zeno`, and compares what the two
-# print (or what Zeno prints with x.expect, where a note says why it is
-# otherwise). The first line of each program says how many of its
-# pieces are kept as Python, so a rule that stops working is seen.
+# tools/convert.py converts each program of Python and of C in
+# tools/convert, runs `python3 x.py` (or the C built with `cc`) and
+# `zeno run x.zeno`, and compares what the two print (or what Zeno
+# prints with x.expect, where a note says why it is otherwise). The
+# first line of each program says how many of its pieces are kept, so a
+# rule that stops working is seen.
 #
 # On a push that changes the converter or the programs, and by hand from
 # the Actions page ("Run workflow").
@@ -43,5 +44,5 @@ jobs:
       - name: The tests of the converter
         run: cargo test --release convert
 
-      - name: Each program converted prints what the Python printed
+      - name: Each program converted prints what the Python or C printed
         run: python3 tools/convert.py
