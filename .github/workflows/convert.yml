@@ -1,0 +1,47 @@
+# Holds `zeno convert` to its promise: what it writes prints what the
+# Python printed, but for what the `# convert:` notes say.
+#
+# tools/convert.py converts each program of Python in tools/convert,
+# runs `python3 x.py` and `zeno run x.zeno`, and compares what the two
+# print (or what Zeno prints with x.expect, where a note says why it is
+# otherwise). The first line of each program says how many of its
+# pieces are kept as Python, so a rule that stops working is seen.
+#
+# On a push that changes the converter or the programs, and by hand from
+# the Actions page ("Run workflow").
+
+name: convert
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/convert*.rs"
+      - "src/inline.rs"
+      - "tools/convert.py"
+      - "tools/convert/**"
+      - ".github/workflows/convert.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: cargo build --release
+
+      - name: The tests of the converter
+        run: cargo test --release convert
+
+      - name: Each program converted prints what the Python printed
+        run: python3 tools/convert.py
