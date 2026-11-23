@@ -3,6 +3,7 @@
   "scopeName": "source.zeno",
   "fileTypes": ["zeno"],
   "patterns": [
+    { "include": "#inline" },
     { "include": "#comment" },
     { "include": "#formatted" },
     { "include": "#text" },
@@ -15,6 +16,61 @@
     { "include": "#operator" }
   ],
   "repository": {
+    "inline": {
+      "patterns": [
+        {
+          "begin": "^(\\s*)(.*?)\\b(inline)\\s+(c)\\s*(\\{)\\s*$",
+          "end": "^\\1(\\})\\s*$",
+          "beginCaptures": {
+            "2": { "patterns": [{ "include": "$self" }] },
+            "3": { "name": "keyword.other.inline.zeno" },
+            "4": { "name": "entity.name.tag.inline.zeno" },
+            "5": { "name": "punctuation.section.embedded.begin.zeno" }
+          },
+          "endCaptures": { "1": { "name": "punctuation.section.embedded.end.zeno" } },
+          "contentName": "meta.embedded.block.c",
+          "patterns": [{ "include": "source.c" }]
+        },
+        {
+          "begin": "^(\\s*)(.*?)\\b(inline)\\s+(python)\\s*(\\{)\\s*$",
+          "end": "^\\1(\\})\\s*$",
+          "beginCaptures": {
+            "2": { "patterns": [{ "include": "$self" }] },
+            "3": { "name": "keyword.other.inline.zeno" },
+            "4": { "name": "entity.name.tag.inline.zeno" },
+            "5": { "name": "punctuation.section.embedded.begin.zeno" }
+          },
+          "endCaptures": { "1": { "name": "punctuation.section.embedded.end.zeno" } },
+          "contentName": "meta.embedded.block.python",
+          "patterns": [{ "include": "source.python" }]
+        },
+        {
+          "begin": "^(\\s*)(.*?)\\b(inline)\\s+(node)\\s*(\\{)\\s*$",
+          "end": "^\\1(\\})\\s*$",
+          "beginCaptures": {
+            "2": { "patterns": [{ "include": "$self" }] },
+            "3": { "name": "keyword.other.inline.zeno" },
+            "4": { "name": "entity.name.tag.inline.zeno" },
+            "5": { "name": "punctuation.section.embedded.begin.zeno" }
+          },
+          "endCaptures": { "1": { "name": "punctuation.section.embedded.end.zeno" } },
+          "contentName": "meta.embedded.block.javascript",
+          "patterns": [{ "include": "source.js" }]
+        },
+        {
+          "begin": "^(\\s*)(.*?)\\b(inline)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\{)\\s*$",
+          "end": "^\\1(\\})\\s*$",
+          "beginCaptures": {
+            "2": { "patterns": [{ "include": "$self" }] },
+            "3": { "name": "keyword.other.inline.zeno" },
+            "4": { "name": "entity.name.tag.inline.zeno" },
+            "5": { "name": "punctuation.section.embedded.begin.zeno" }
+          },
+          "endCaptures": { "1": { "name": "punctuation.section.embedded.end.zeno" } },
+          "contentName": "meta.embedded.block.zeno"
+        }
+      ]
+    },
     "comment": {
       "name": "comment.line.number-sign.zeno",
       "match": "#.*$"

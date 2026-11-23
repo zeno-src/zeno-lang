@@ -30,7 +30,14 @@ syntax region zenoText start=+\<f"+ skip=+\\.+ end=+"+ oneline contains=zenoEsca
 syntax region zenoText start=+\<f'+ skip=+\\.+ end=+'+ oneline contains=zenoEscape,zenoPlaceholder
 syntax match zenoComment "#.*$" contains=@Spell
 
+" `let lib = inline c {` to the `}` under the first letter of that line:
+" code of another language, which is not coloured as Zeno. `inline` is a
+" name anywhere else.
+syntax region zenoInline matchgroup=zenoInlineEdge start="^\z(\s*\).*\<inline\s\+\h\w*\s*{\s*$" end="^\z1}\s*$" keepend
+
 highlight default link zenoDeclare Keyword
+highlight default link zenoInline PreProc
+highlight default link zenoInlineEdge Keyword
 highlight default link zenoModifier StorageClass
 highlight default link zenoControl Statement
 highlight default link zenoWord Operator
