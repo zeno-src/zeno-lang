@@ -1,0 +1,249 @@
+\chapter{A File of Python Written as Zeno}\label{ch-convert}
+
+The block of the last chapter keeps code as it was written. Since 0.9
+\verb|zeno convert| goes the other way: it takes a whole file of
+Python and writes it again as Zeno. What it can say in Zeno it says
+in Zeno, and what it cannot it leaves as Python, in an
+\verb|inline python| block that the Zeno calls. So what it writes
+always runs, and prints what the Python printed.
+
+\begin{note}
+The one promise is that what is written is never silently wrong.
+Where Zeno would do even a little otherwise than Python, the converter
+either says so in a comment or keeps the line as Python.
+\end{note}
+
+\section{A first file}
+
+Here is a small till, in Python:
+
+\begin{zeno}[file=shop.py, dir=convert, run=no]
+# A till: prices, a basket, and a receipt.
+import textwrap
+
+PRICES = {"tea": 2.5, "cake": 3.0, "jam": 1.25}
+
+
+def line_total(item, count):
+    return PRICES[item] * count
+
+
+def receipt(basket):
+    lines = []
+    total = 0.0
+    for item, count in basket.items():
+        cost = line_total(item, count)
+        total += cost
+        lines.append(f"{item:<6} x{count}  {cost:6.2f}")
+    lines.append(f"{'total':<9} {total:6.2f}")
+    return lines
+
+
+basket = {"tea": 2, "jam": 3}
+basket["cake"] = 1
+for line in receipt(basket):
+    print(line)
+words = sorted(word.upper() for word in basket)
+print(", ".join(words))
+note = textwrap.fill("Thank you for shopping with us, and come back soon.", width=24)
+print(note)
+\end{zeno}
+
+One command writes \verb|shop.zeno| beside it, and says what it did
+with each piece of the file:
+
+\begin{zeno}[file=shop.py, dir=convert, show=no, cmd=zeno convert {file}]
+# A till: prices, a basket, and a receipt.
+import textwrap
+
+PRICES = {"tea": 2.5, "cake": 3.0, "jam": 1.25}
+
+
+def line_total(item, count):
+    return PRICES[item] * count
+
+
+def receipt(basket):
+    lines = []
+    total = 0.0
+    for item, count in basket.items():
+        cost = line_total(item, count)
+        total += cost
+        lines.append(f"{item:<6} x{count}  {cost:6.2f}")
+    lines.append(f"{'total':<9} {total:6.2f}")
+    return lines
+
+
+basket = {"tea": 2, "jam": 3}
+basket["cake"] = 1
+for line in receipt(basket):
+    print(line)
+words = sorted(word.upper() for word in basket)
+print(", ".join(words))
+note = textwrap.fill("Thank you for shopping with us, and come back soon.", width=24)
+print(note)
+\end{zeno}
+
+This is the Zeno it wrote:
+
+\begin{zeno}[file=read.txt, dir=convert, show=no, cmd=cat shop.zeno]
+shop.zeno
+\end{zeno}
+
+The types came from the program itself. \verb|line_total| is given a
+text and a whole number at its one call, and gives back a float, so it
+is \verb|function line_total(item: str, count: int) -> float|.
+\verb|basket| holds whole numbers under texts, so \verb|receipt| takes
+a \verb|dict[str, int]|. \verb|sorted| is not a function of Zeno, so
+the file gets a short one at the top, with a comment that says what it
+is. \verb|textwrap| is a library of Python that Zeno has no words for:
+its \verb|import| stays in the block, and \verb|fill| is called
+through it, as \verb|py.textwrap.fill|.
+
+Both print the same:
+
+\begin{zeno}[file=read.txt, dir=convert, show=no, cmd=zeno run shop.zeno ;; python3 shop.py]
+shop.zeno
+\end{zeno}
+
+\section{Pieces, and what becomes of each}
+
+The converter cuts the file into \emph{pieces}: the statements that
+begin at its left margin. A \verb|def| with its body is one piece, so
+is a \verb|class|, a \verb|for| loop at the top of the file, or one
+line such as \verb|basket["cake"] = 1|. Each piece ends in one of
+three states:
+
+\begin{center}
+\begin{tabular}{lP{8cm}}
+\toprule
+State & What is written \\
+\midrule
+Zeno & lines of Zeno that mean what the piece meant \\
+Zeno with a note & the same, with a \verb|# convert:| comment where
+  Zeno does something a reader of Python would not expect \\
+Kept & the piece as it was written, in the \verb|inline python|
+  block \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A piece is cut whole, because a piece is what a reader sees as one
+thing, and keeping one whole keeps its meaning: nothing inside it is
+changed.
+
+\section{What is kept}
+
+Some of Python is not in Zeno: a \verb|lambda|, a function inside a
+function, \verb|yield|, a class with a base, \verb|sort(key=...)|. A
+piece with one of these is kept, and the report says why, with the
+line:
+
+\begin{zeno}[file=counter.py, dir=kept, show=no, cmd=zeno convert {file} ;; cat counter.zeno]
+def make_counter():
+    count = 0
+
+    def step():
+        nonlocal count
+        count += 1
+        return count
+
+    return step
+
+
+tick = make_counter()
+for _ in range(3):
+    tick()
+print("ticks:", tick())
+
+values = [3, 1, 2]
+values.sort(key=lambda value: -value)
+print(values)
+print(len(values), max(values))
+\end{zeno}
+
+A kept \verb|def| goes at the top of the block. A kept piece that does
+something, such as the loop, becomes a function of the block,
+\verb|convert_step_2|, and the Zeno calls it where the loop was, so it
+runs exactly when it ran in the Python.
+
+Some pieces are kept for what another piece became. \verb|tick| holds
+what a kept function gave, which only Python can call, so the line
+that gives it its value is kept too: Python can only call Python, and
+a variable lives on one side. Each reason in the report says which.
+
+The converter keeps one piece at a time. When several pieces cannot be
+written, it keeps the first that has a reason of its own, and tries
+the rest again, since a piece that could not be written a moment ago
+often can be once the piece it depended on has gone to Python.
+
+\section{What crosses between the two sides}
+
+The Zeno and the block are two sides of the bridge to Python of
+\hyperref[ch-other-languages]{Libraries of Other Languages}. A number, a
+text, a bool and \verb|none| cross exactly. A value of Python's own,
+such as an object a kept class made, stays in Python, and Zeno holds
+it as a handle. A list or a dict of Zeno is copied on its way to
+Python, and what Python did to its copy would not be seen. So the
+converter gives a function of the block only numbers, texts, bools,
+\verb|none|, values of Python's own, and lists or dicts written right
+there in the call. A line that would give it a list the Zeno holds is
+kept.
+
+\section{The notes}
+
+Each note marks a place where the Zeno does what the Python did, but
+prints or raises a little otherwise. The comment is written once for
+each kind, above the first line it applies to, and the report lists
+every line.
+
+\begin{center}
+\begin{tabular}{P{4.6cm}P{7.2cm}}
+\toprule
+Note & What is otherwise \\
+\midrule
+a value is shown as Zeno shows it & \verb|true|, \verb|false| and
+  \verb|none| in small letters, a text inside a list in double quotes,
+  a dict between \verb|[| and \verb|]| \\
+a very large or very small float & Python's \verb|1e+16| is
+  \verb|1e16| \\
+the message of an error & in Zeno's words where Zeno raised it \\
+an \verb|except| catches more & Zeno raises an error where Python
+  raises none: a whole number past 64 bits, say \\
+\verb|upper| and \verb|lower| & a to z only \\
+\verb|math.round| & a half goes away from zero: 2.5 to 3 \\
+a float from the first value & the variable holds a float later, and
+  a variable of Zeno has one type \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{What it does not promise}
+
+A program that Python stops with \verb|NameError| is outside the
+promise: a name the converter declares before a block has the first
+value of its type, where Python would stop. Whole numbers past 64 bits
+make Zeno stop with \verb|OverflowError|, so that is never silent, but
+\verb|int()| of a float past 64 bits gives the largest whole number
+Zeno has. The rest is rare, and is listed in \verb|docs/convert.md|.
+
+\section{How it is checked}
+
+Every rule is held to its word by programs of Python in
+\verb|tools/convert| of the repository. Each is converted, run with
+\verb|python3| and with \verb|zeno run|, and what the two print is
+compared; the first line of each says how many of its pieces are to be
+kept, so that a rule that stops working is seen even when the output
+is still the same. One of them is a program of 240 lines, with
+classes, a dataclass, dicts of objects, exceptions, f-strings and a
+report, and all of it but its \verb|import json| is written as Zeno.
+
+Last of all, the converter reads what it wrote with Zeno's own
+checker, in the same program, before it writes the file. A piece the
+checker does not take is kept, with the checker's words as the reason.
+Nothing Zeno would refuse is ever given out.
+
+\begin{note}
+C is the next language \verb|zeno convert| is to read, with what it
+cannot read left in an \verb|inline c| block.
+\end{note}

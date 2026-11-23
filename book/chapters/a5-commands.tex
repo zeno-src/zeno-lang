@@ -26,6 +26,12 @@ Command & What it does \\
 \verb|zeno format f.zeno| & lay files out the one way Zeno lays them
   out; several files, or a folder, can be named
   (\hyperref[ch-tools]{The Tools}) \\
+\verb|zeno convert f.py| & write a file of Python again as Zeno, as
+  \verb|f.zeno|, keeping what cannot be written in an
+  \verb|inline python| block, and say what was done with each piece
+  (\hyperref[ch-convert]{A File of Python Written as Zeno}).
+  \verb|--to| names the file to write, \verb|--replace| writes over
+  one \\
 \verb|zeno new name| & make a folder with a new program in it: a
   \verb|main.zeno|, a module with a test, and a \verb|zeno.package|
   (\hyperref[ch-packages]{Packages}) \\
