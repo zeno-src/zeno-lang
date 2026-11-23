@@ -967,6 +967,9 @@ impl Interpreter {
             },
             ExprKind::Float(x) => Ok(Value::Float(*x)),
             ExprKind::Str(text) => Ok(Value::str(text)),
+            // A block of another language: its bridge makes it a
+            // library or a module (decision 61).
+            ExprKind::Inline { language, text } => crate::inline::run(language, text, span),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::None => Ok(Value::None),
 
@@ -3294,6 +3297,153 @@ print(json.parse("\"" + bs + "u0041" + bs + "ud83d" + bs + "ude00\""))"#;
              [0.0, 1.5, 3.0] [4, 5, 2] none\n\
              <C library m> uint16_t crc16(const uint8_t *data, size_t length)\n"
         );
+    }
+
+    /// A block of C that holds what a real one does: a header, a type,
+    /// a table and a function of its own, and the functions it gives.
+    const C_BLOCK: &str = "import c\n\
+         let lib = inline c {\n    \
+             #include <stdint.h>\n    \
+             #include <string.h>\n\n    \
+             typedef struct { int count; } counter;\n    \
+             static counter only;\n    \
+             static const uint16_t STEP = 0xA001;\n\n    \
+             static uint16_t step(uint16_t crc) { return (crc & 1) ? (crc >> 1) ^ STEP : crc >> 1; }\n\n    \
+             /* The checksum of Modbus: a } here ends nothing. */\n    \
+             uint16_t crc16(const uint8_t *data, size_t length) {\n        \
+                 uint16_t crc = 0xFFFF;\n        \
+                 for (size_t i = 0; i < length; i++) {\n            \
+                     crc ^= data[i];\n            \
+                     for (int b = 0; b < 8; b++) { crc = step(crc); }\n        \
+                 }\n        \
+                 return crc;\n    \
+             }\n\n    \
+             counter *counter_get(void) { return &only; }\n    \
+             int counter_add(counter *c, int by) { c->count += by; return c->count; }\n    \
+             void fill(double *out, int n) { for (int i = 0; i < n; i++) { out[i] = i * 1.5; } }\n    \
+             const char *closing(void) { return \"}\"; }\n\
+         }\n";
+
+    #[test]
+    fn a_block_of_c_is_a_library_of_c() {
+        if !cc_is_here() {
+            return;
+        }
+        // The functions of the block are called as the functions of a
+        // library are: a number checked to fit, a list lent for a
+        // pointer, a pointer kept as it is, text copied.
+        assert_eq!(
+            output(&format!(
+                "{C_BLOCK}\
+                 let frame: list[u8] = [0x01, 0x03, 0x00, 0x6B, 0x00, 0x03]\n\
+                 print(lib.crc16(frame, len(frame)))\n\
+                 let counter = lib.counter_get()\n\
+                 lib.counter_add(counter, 2)\n\
+                 print(lib.counter_add(counter, 3), lib.closing(), lib)\n\
+                 let out = [0.0, 0.0, 0.0]\n\
+                 lib.fill(out, 3)\n\
+                 print(out)\n"
+            )),
+            "6004\n5 } <C library inline c>\n[0.0, 1.5, 3.0]\n"
+        );
+        // Two blocks in one file are two libraries, and a block in a
+        // function is built once however often the function runs.
+        assert_eq!(
+            output(
+                "import c\n\
+                 let a = inline c {\n    int value(void) { return 1; }\n}\n\
+                 function twice(n: int) -> int {\n    \
+                     let b = inline c {\n        int value(int n) { return 2 * n; }\n    }\n    \
+                     return b.value(n)\n\
+                 }\n\
+                 print(a.value(), twice(4), twice(5))\n"
+            ),
+            "1 8 10\n"
+        );
+        // A number that does not fit what the function takes is the
+        // error it is for a library.
+        assert_eq!(
+            error(&format!("{C_BLOCK}lib.crc16([300], 1)")),
+            "uncaught OverflowError: item 0 of the list given for the 1st parameter of `crc16` (`const uint8_t *`) holds 0 to 255, and this is 300"
+        );
+    }
+
+    #[test]
+    fn a_block_of_c_that_does_not_compile_stops_the_program_at_its_line() {
+        if !cc_is_here() {
+            return;
+        }
+        // What the C compiler says names the line of the `.zeno` file,
+        // and no `try` catches it: the program is wrong, not unlucky.
+        let said = error(
+            "import c\n\
+             try {\n    \
+                 let lib = inline c {\n        int twice(int x) { return 2 * y; }\n    }\n    \
+                 print(lib.twice(2))\n\
+             } except Error as wrong {\n    print(\"caught\")\n}\n",
+        );
+        assert!(said.starts_with("C could not build this `inline c` block. The C compiler said:"), "{said}");
+        assert!(said.contains(".zeno:4:"), "{said}");
+        assert!(said.contains("y"), "{said}");
+    }
+
+    #[test]
+    fn a_block_of_python_is_a_module_of_python() {
+        if !python_is_here() {
+            return;
+        }
+        assert_eq!(
+            output(
+                "import python\n\
+                 let stats = inline python {\n    \
+                     import statistics\n\n    \
+                     LIMIT = {\"low\": 1}\n\n    \
+                     def spread(readings):\n        \
+                         # a comment of Python, and a brace: }\n        \
+                         return max(readings) - min(readings)\n\n    \
+                     class Counter:\n        \
+                         def __init__(self):\n            \
+                             self.count = 0\n\n        \
+                         def add(self, by):\n            \
+                             self.count += by\n            \
+                             return self.count\n\
+                 }\n\
+                 let counter = stats.Counter()\n\
+                 counter.add(2)\n\
+                 print(stats.spread([21.5, 22.0, 23.5]), counter.add(3), stats.LIMIT[\"low\"], stats.statistics.mean([1, 3]))\n"
+            ),
+            "2.0 5 1 2\n"
+        );
+        // A block Python cannot read stops the program, and Python's
+        // own line is the line of the `.zeno` file.
+        let said = error("import python\nprint(\"before\")\nlet m = inline python {\n    def f(:\n        return 1\n}\n");
+        assert!(said.starts_with("this `inline python` block could not be started. Python said: SyntaxError:"), "{said}");
+        assert!(said.contains("line 4"), "{said}");
+    }
+
+    #[test]
+    fn a_block_of_javascript_is_a_module_of_node() {
+        if !node_is_here() {
+            return;
+        }
+        assert_eq!(
+            output(
+                "import node\n\
+                 let text = inline node {\n    \
+                     const path = require(\"path\")\n\n    \
+                     // a comment of JavaScript, and a brace: }\n    \
+                     exports.shout = (word) => word.toUpperCase() + \"!\"\n    \
+                     exports.sum = function (items) {\n        \
+                         return items.reduce((a, b) => a + b, 0)\n    \
+                     }\n    \
+                     exports.base = (file) => path.basename(file)\n\
+                 }\n\
+                 print(text.shout(\"zeno\"), text.sum([1, 2, 3]), text.base(\"/a/b.txt\"))\n"
+            ),
+            "ZENO! 6 b.txt\n"
+        );
+        let said = error("import node\nlet m = inline node {\n    const a = require(\"no-such-package-of-zeno\")\n}\n");
+        assert!(said.starts_with("this `inline node` block could not be started. JavaScript said: Cannot find module"), "{said}");
     }
 
     #[test]

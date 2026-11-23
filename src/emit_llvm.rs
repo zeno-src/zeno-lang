@@ -5565,6 +5565,17 @@ impl Emitter<'_> {
             ExprKind::Float(x) => Val::new(float_code(*x), Kind::Float),
             ExprKind::Bool(b) => Val::new(b.to_string(), Kind::Bool),
             ExprKind::Str(text) => Val::new(self.string(text), Kind::Str).fixed(),
+            // A block of C is C, and this build writes none (61.7).
+            ExprKind::Inline { language, .. } => {
+                return Err(Error::new(
+                    format!(
+                        "`zeno build --llvm` cannot take an `inline {language}` block: it writes LLVM, and the block is not that. \
+                         {}",
+                        if language == "c" { "`zeno build` without `--llvm` writes C, and takes it" } else { "`zeno run` takes it" }
+                    ),
+                    span,
+                ));
+            }
             ExprKind::FormatStr(parts) => self.format_string(parts, span)?,
             // What `none` is in IR depends on where it is going, so it is
             // settled there. See `coerce`.

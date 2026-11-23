@@ -1990,7 +1990,7 @@ fn call_in(place: &Expr) -> Option<&Expr> {
     match &place.kind {
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
+        | ExprKind::Str(_) | ExprKind::Inline { .. }
         | ExprKind::Bool(_)
         | ExprKind::None
         | ExprKind::Name(_)
@@ -2067,7 +2067,7 @@ fn not_yet(above: &[String], env: &Env) -> Vec<String> {
 /// by name alone and does not look inside a function written as a value.
 fn names_in(expr: &Expr, names: &mut Vec<String>) {
     match &expr.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
         ExprKind::Function(_) => {}
         ExprKind::Name(name) | ExprKind::Give(name) => names.push(name.clone()),
         ExprKind::FormatStr(parts) => {
@@ -4365,7 +4365,7 @@ impl Checker {
             None
         };
         match &value.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => None,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => None,
             ExprKind::Name(name) => match env.get(name) {
                 Some(variable) if self.consts.contains(&variable.id) || variable.case.is_some() => None,
                 _ => Some(value),
@@ -7358,6 +7358,7 @@ impl Checker {
             }
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str,
+            ExprKind::Inline { language, text } => self.inline(language, text, env, span),
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::None => Ty::None,
 
@@ -8148,6 +8149,18 @@ impl Checker {
                 Some(at) => Ty::CFunction(library.clone(), at),
                 None => {
                     let declared: Vec<&str> = library.functions.iter().map(|function| function.name.as_str()).collect();
+                    if library.block.is_some() {
+                        // An `inline c` block declares nothing: it has
+                        // the functions it writes out.
+                        return self.error(
+                            format!(
+                                "this `inline c` block has no function `{name}` that Zeno can call. It has: {}. \
+                                 A function marked `static` is the block's own",
+                                declared.join(", ")
+                            ),
+                            span,
+                        );
+                    }
                     self.error(
                         format!(
                             "the library `{}` has no `{name}` among what is declared for it. Declared: {}",
@@ -8837,6 +8850,56 @@ impl Checker {
                 self.error(why, args[1].value.span);
                 None
             }
+        }
+    }
+
+    /// `inline c { ... }`, `inline python { ... }`, `inline node { ... }`:
+    /// what a block of another language gives (decision 61).
+    ///
+    /// A block is asked for twice: by the word `inline`, and by the
+    /// `import` of its language, which is what starts that language for
+    /// every other use of it. A block of C is a library whose functions
+    /// are the ones it writes out, each typed from its own first line,
+    /// so a call of one is checked here as a call of a function of Zeno
+    /// is. A block of Python or of JavaScript is a module, and what it
+    /// has is known when the program runs, as for `python.module`.
+    fn inline(&mut self, language: &str, text: &str, env: &Env, span: Span) -> Ty {
+        if !crate::inline::LANGUAGES.iter().any(|(word, _)| *word == language) {
+            return self.error(crate::inline::unknown(language), span);
+        }
+        if !matches!(env.get(language), Some(Variable { ty: Ty::Module(module), .. }) if module == language) {
+            return self.error(
+                format!(
+                    "an `inline {language}` block needs `import {language}` at the top of the file. \
+                     The import is what asks for the other language, and a file with no such line uses none"
+                ),
+                span,
+            );
+        }
+        if language != "c" {
+            if self.strict_at(span) {
+                let name = crate::inline::LANGUAGES.iter().find(|(word, _)| *word == language).map_or(language, |(_, name)| name);
+                return self.error(
+                    format!(
+                        "strict mode: what an `inline {language}` block gives is known only when the program runs, by {name}. \
+                         `zeno build` and `zeno check --strict` do not take it, and `zeno run` does"
+                    ),
+                    span,
+                );
+            }
+            return Ty::Dynamic;
+        }
+        if let Some(known) = self.types.c_libraries.iter().find(|known| known.span == span) {
+            return Ty::CLibrary(known.clone());
+        }
+        let number = self.types.c_libraries.len();
+        match crate::bridge_c::library_of_block(crate::inline::c_block(text, span), number, span) {
+            Ok(library) => {
+                let library = Rc::new(library);
+                self.types.c_libraries.push(library.clone());
+                Ty::CLibrary(library)
+            }
+            Err(why) => self.error(why, span),
         }
     }
 
@@ -12519,6 +12582,47 @@ mod tests {
         assert_eq!(error(&format!("{f}f(b=\"y\", 1)")), "plain arguments must come before named ones");
         assert_eq!(error("let x = 5\nx()"), "int cannot be called");
         assert_eq!(error("function f(a: int = \"no\") { }"), "`a` should be int, but this is str");
+    }
+
+    #[test]
+    fn an_inline_block_is_asked_for_twice_and_typed_from_its_own_lines() {
+        let block = "import c\nlet lib = inline c {\n    #include <stdint.h>\n    static int helper(int x) { return x; }\n    \
+                     uint8_t low(uint32_t x) { return (uint8_t) helper((int) x); }\n    double half(double x) { return x / 2; }\n}\n";
+        // A function of the block is called as a function of Zeno is,
+        // and a wrong call is found before the program runs.
+        ok(&format!("{block}let a: int = lib.low(300)\nlet b: float = lib.half(3.0)\nprint(a, b, lib)"));
+        strict_ok(&format!("{block}print(lib.low(300))"));
+        assert_eq!(error(&format!("{block}lib.half(\"x\")")), "the 1st parameter of `half` (`double`) should be float, but this is str");
+        assert_eq!(error(&format!("{block}lib.low(1, 2)")), "`low` takes 1 argument, but 2 were given");
+        assert_eq!(
+            error(&format!("{block}lib.helper(1)")),
+            "this `inline c` block has no function `helper` that Zeno can call. It has: low, half. A function marked `static` is the block's own"
+        );
+        // The import is the first asking, the word `inline` the second.
+        assert_eq!(
+            error("let lib = inline c {\n    int one(void) { return 1; }\n}\n"),
+            "an `inline c` block needs `import c` at the top of the file. The import is what asks for the other language, and a file with no such line uses none"
+        );
+        assert_eq!(
+            error("import c\nlet lib = inline python {\n    x = 1\n}\n"),
+            "an `inline python` block needs `import python` at the top of the file. The import is what asks for the other language, and a file with no such line uses none"
+        );
+        // A language that has no block is told what it has.
+        assert!(error("import c\nlet a = inline asm {\n    nop\n}\n").starts_with("there is no `inline asm`. A block is `inline c`, `inline python` or `inline node`. Assembly is written inside an `inline c` block"));
+        assert!(error("import c\nlet a = inline cpp {\n    int x;\n}\n").contains("C++ has no block"));
+        assert!(error("import node\nlet a = inline js {\n    exports.x = 1\n}\n").ends_with("JavaScript is `inline node`"));
+        // A block with nothing in it for Zeno says so.
+        assert!(error("import c\nlet lib = inline c {\n    static int one(void) { return 1; }\n}\n").starts_with("this `inline c` block has no function that Zeno can call."));
+        // What a block of Python or JavaScript gives is known when the
+        // program runs, which strict mode, and so a build, does not take.
+        ok("import python\nlet m = inline python {\n    def f(x):\n        return x\n}\nprint(m.f(1), m.anything)");
+        ok("import node\nlet m = inline node {\n    exports.f = (x) => x\n}\nprint(m.f(1))");
+        assert_eq!(
+            strict_error("import python\nlet m = inline python {\n    x = 1\n}\n"),
+            "strict mode: what an `inline python` block gives is known only when the program runs, by Python. `zeno build` and `zeno check --strict` do not take it, and `zeno run` does"
+        );
+        // `inline` is still a name.
+        ok("let inline = 3\nprint(inline + 1)");
     }
 
     #[test]

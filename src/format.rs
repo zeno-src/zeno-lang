@@ -130,7 +130,15 @@ fn layout(written: &Written) -> String {
     // The line before this one was code that ended by opening a bracket.
     let mut just_opened = false;
 
-    for line in &lines {
+    // The lines of an `inline` block after its first are the block's
+    // own, and were written out with it: up to this line, none is a
+    // blank line of Zeno.
+    let mut block_until = 0;
+
+    for (number, line) in lines.iter().enumerate() {
+        if number < block_until {
+            continue;
+        }
         if line.tokens.is_empty() && line.comment.is_none() {
             blank = true;
             continue;
@@ -171,6 +179,16 @@ fn layout(written: &Written) -> String {
                 out.push(' ');
                 width += 1;
             }
+            if let TokenKind::Inline { language, .. } = kind {
+                // Code of another language is not laid out: every line
+                // of it stays as it was written, and the whole block
+                // moves with the line that opens it (decision 61.8).
+                let text = &written.texts[place];
+                out.push_str(&block(language, text, indent * STEP));
+                block_until = number + text.lines().count();
+                width += 1;
+                continue;
+            }
             out.push_str(&written.texts[place]);
             width += written.texts[place].chars().count();
             match kind {
@@ -194,6 +212,38 @@ fn layout(written: &Written) -> String {
         }
         just_opened = line.tokens.last().is_some_and(|&place| opener(&tokens[place].kind));
     }
+    out
+}
+
+/// An `inline` block as it is written out: its first line, the lines
+/// of the other language one step in from it, and the `}` that ends it
+/// under the line that opened it. `text` is the block as it was
+/// written, from `inline` to that `}`.
+///
+/// What the lines say is not touched: only the indentation they all
+/// share is changed, which is not part of what a block says (see
+/// `Lexer::inline_block`), and each keeps how far in it is from the
+/// others, which in Python is part of the program.
+fn block(language: &str, text: &str, indent: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let inside: Vec<&str> = lines[1..lines.len().saturating_sub(1)].iter().map(|line| line.trim_end()).collect();
+    let blank = |c: &char| *c == ' ' || *c == '\t';
+    let shared = inside
+        .iter()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.chars().take_while(blank).collect::<String>())
+        .reduce(|shared, own| shared.chars().zip(own.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect())
+        .unwrap_or_default();
+    let mut out = format!("inline {language} {{\n");
+    for line in inside {
+        if !line.is_empty() {
+            out.push_str(&" ".repeat(indent + STEP));
+            out.push_str(line.strip_prefix(shared.as_str()).unwrap_or(line));
+        }
+        out.push('\n');
+    }
+    out.push_str(&" ".repeat(indent));
+    out.push('}');
     out
 }
 
@@ -427,7 +477,7 @@ mod tests {
             assert!(formatted(&source) == source, "{} is not laid out as `zeno format` lays it out", path.display());
             // The indentation is worked out from the brackets alone: take
             // it all away, and the formatter puts the same back.
-            let flat: String = source.lines().map(|line| format!("{}\n", line.trim_start())).collect();
+            let flat = flattened(&source);
             assert!(formatted(&flat) == source, "{} is indented otherwise from nothing", path.display());
             // So are the spaces: with three between every two tokens,
             // the formatter gives the same file.
@@ -437,6 +487,35 @@ mod tests {
             let differs = narrow.lines().zip(source.lines()).find(|(new, old)| new != old);
             assert!(narrow == source, "{} is spaced otherwise from nothing: {differs:?}", path.display());
         }
+    }
+
+    /// The source with no indentation. The lines of an `inline` block are
+    /// not Zeno's to indent: they move as far as the line that opens the
+    /// block moves, and keep the shape they were written in.
+    fn flattened(source: &str) -> String {
+        let mut flat = String::new();
+        // How far in the line that opened a block was, inside one.
+        let mut block: Option<usize> = None;
+        for line in source.lines() {
+            match block {
+                Some(indent) => {
+                    flat.push_str(line.get(indent..).unwrap_or("").trim_end());
+                    if line.len() == indent + 1 && line.ends_with('}') {
+                        block = None;
+                    }
+                }
+                None => {
+                    let written = line.trim_start();
+                    let words: Vec<&str> = written.split_whitespace().collect();
+                    if let [.., "inline", _, "{"] = words[..] {
+                        block = Some(line.len() - written.len());
+                    }
+                    flat.push_str(written);
+                }
+            }
+            flat.push('\n');
+        }
+        flat
     }
 
     /// The source with three spaces between every two tokens of a line,
@@ -473,6 +552,21 @@ mod tests {
         assert_eq!(errors[0].message, "expected an expression, found `=`");
         assert!(format("let a = \"open\n").is_err());
         assert!(format("if a {\n").is_err());
+    }
+
+    #[test]
+    fn an_inline_block_moves_with_its_line_and_is_not_laid_out() {
+        // The lines of another language are not Zeno's to lay out: no
+        // space is added around `*`, the blank line stays, and Python
+        // keeps how far in each line is from the others. The block is
+        // set one step in from the line that opens it.
+        let messy = "function f( )->int{\n  let lib   =   inline   c   {\n        int twice(int x) {\n            return 2*x;   \n        }\n\n  }\n  return lib.twice( 4 )\n}\nlet m = inline python {\n  def mean(xs):\n      return sum(xs)/len(xs)\n}\n";
+        let once = formatted(messy);
+        assert_eq!(
+            once,
+            "function f() -> int {\n    let lib = inline c {\n        int twice(int x) {\n            return 2*x;\n        }\n\n    }\n    return lib.twice(4)\n}\nlet m = inline python {\n    def mean(xs):\n        return sum(xs)/len(xs)\n}\n"
+        );
+        assert_eq!(formatted(&once), once);
     }
 
     #[test]

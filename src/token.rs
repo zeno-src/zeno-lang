@@ -54,6 +54,11 @@ pub enum TokenKind {
     Str { value: String, formatted: bool },
     /// A name chosen by the programmer: a variable, function, type, ...
     Ident(String),
+    /// `inline c {` and every line after it, up to the `}` that ends the
+    /// block: code of another language, kept as it was written (decision
+    /// 61). `text` is the lines between, with the indentation they share
+    /// taken off.
+    Inline { language: String, text: String },
 
     // --- Keywords ---
     Let,
@@ -206,6 +211,7 @@ impl TokenKind {
             Int(_) | Float(_) => return "a number".to_string(),
             Str { .. } => return "a string".to_string(),
             Ident(name) => return format!("the name `{name}`"),
+            Inline { language, .. } => return format!("an `inline {language}` block"),
             Newline => return "the end of the line".to_string(),
             Eof => return "the end of the file".to_string(),
 

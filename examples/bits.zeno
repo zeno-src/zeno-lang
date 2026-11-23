@@ -1,0 +1,45 @@
+# Bits, by the C that does them best. The block is C as it would be in
+# a `.c` file, and its functions are called as functions of Zeno are
+# (docs/inline.md).
+#
+#     zeno run examples/bits.zeno
+#     zeno build examples/bits.zeno
+import c
+
+let bits = inline c {
+    #include <stdint.h>
+
+    /* The bits of a byte, in the other order, by a table of sixteen. */
+    static const uint8_t HALF[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+
+    uint8_t reversed(uint8_t byte) {
+        return (uint8_t) ((HALF[byte & 15] << 4) | HALF[byte >> 4]);
+    }
+
+    /* How many bits of x are 1. */
+    int ones(uint32_t x) {
+        int count = 0;
+        for (; x != 0; x &= x - 1) {
+            count++;
+        }
+        return count;
+    }
+
+    /* The hash FNV-1a of some bytes. It is made of sums that wrap
+       round at 32 bits, which C does and Zeno stops a program for. */
+    uint32_t hash(const uint8_t *bytes, size_t length) {
+        uint32_t h = 2166136261u;
+        for (size_t i = 0; i < length; i++) {
+            h = (h ^ bytes[i]) * 16777619u;
+        }
+        return h;
+    }
+}
+
+for byte in [0x01, 0x0F, 0xA5] {
+    print(f"{byte:08b} reversed is {bits.reversed(byte):08b}, and has {bits.ones(byte)} ones")
+}
+
+for word in ["zeno", "tortoise", "achilles"] {
+    print(f"{word:<10} {bits.hash(word, len(word)):08x}")
+}

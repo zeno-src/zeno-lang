@@ -196,6 +196,8 @@ impl Loader<'_> {
             true => lexer::lex_in(&source, number).and_then(|tokens| parser::parse(tokens).map_err(|error| vec![error])),
             false => Err(vec![Error::new("this file has a million lines or more, and Zeno reads at most 999,999. Split it", top)]),
         };
+        // A block of another language is told which file it is in.
+        crate::inline::file_is(number, &path);
         self.files.push(File { path, source });
         self.units.push(None);
         let program = match parsed {
@@ -1539,7 +1541,7 @@ impl<'a> Renamer<'a> {
         }
 
         match &mut expr.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
             ExprKind::Name(name) | ExprKind::Give(name) => self.plain(name, span),
             ExprKind::FormatStr(parts) => {
                 for part in parts {

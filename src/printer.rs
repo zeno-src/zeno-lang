@@ -305,6 +305,7 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::Int(n) => n.to_string(),
         ExprKind::Float(x) => format!("{x:?}"),
         ExprKind::Str(s) => format!("{s:?}"),
+        ExprKind::Inline { language, text } => format!("(inline {language} {text:?})"),
         ExprKind::FormatStr(parts) => {
             let mut text = String::from("f\"");
             for part in parts {

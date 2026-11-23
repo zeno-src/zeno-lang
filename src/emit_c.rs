@@ -387,6 +387,15 @@ pub fn emit_tests(program: &Program, types: &Types, file: &str, build: Build, op
 }
 
 fn emit_all(program: &Program, types: &Types, file: &str, build: Build, options: Options, tests: Option<&TestBuild>) -> Result<String, Error> {
+    let c = emit_whole(program, types, file, build, options, tests)?;
+    // The file of C this becomes: `sensor.c` for `sensor.zeno`, and
+    // `sensor-tests.c` for its tests.
+    let name = std::path::Path::new(file).file_stem().and_then(|name| name.to_str()).unwrap_or("program");
+    let c_file = format!("{name}{}.c", if tests.is_some() { "-tests" } else { "" });
+    Ok(with_blocks_placed(c, types, &c_file))
+}
+
+fn emit_whole(program: &Program, types: &Types, file: &str, build: Build, options: Options, tests: Option<&TestBuild>) -> Result<String, Error> {
     let firmware = build != Build::Ordinary;
     let collector = build != Build::NoCollector;
     let mut emitter = Emitter {
@@ -734,6 +743,41 @@ fn emit_all(program: &Program, types: &Types, file: &str, build: Build, options:
     Ok(c)
 }
 
+/// The line that stands where an `inline c` block begins, and the one
+/// where it ends, until the file is whole.
+fn block_mark(number: usize, ends: bool) -> String {
+    format!("/* An inline c block of the program ({number}){} */\n", if ends { ": its end" } else { "" })
+}
+
+/// The C of a program, with each `inline c` block marked by where it
+/// was written: a `#line` before it that names the `.zeno` file and the
+/// line, so that what the C compiler says of the block, and what a
+/// debugger shows, is the line the programmer wrote, and a `#line`
+/// after it that goes back to this file of C. A program with no block
+/// is given back as it is.
+fn with_blocks_placed(c: String, types: &Types, c_file: &str) -> String {
+    if !types.c_libraries.iter().any(|library| library.block.is_some()) {
+        return c;
+    }
+    let mut out = String::with_capacity(c.len() + 256);
+    let mut written = 0;
+    for line in c.split_inclusive('\n') {
+        written += 1;
+        let block = types.c_libraries.iter().find_map(|library| {
+            let block = library.block.as_ref()?;
+            if line == block_mark(library.number, false) {
+                Some(format!("#line {} \"{}\"\n", block.line, block.file.replace('\\', "/").replace('"', "")))
+            } else if line == block_mark(library.number, true) {
+                Some(format!("#line {} \"{}\"\n", written + 1, c_file.replace('\\', "/").replace('"', "")))
+            } else {
+                None
+            }
+        });
+        out.push_str(block.as_deref().unwrap_or(line));
+    }
+    out
+}
+
 /// What a program that says `import c` needs in its C: each library's
 /// lines (`#include`, `typedef`) and declarations, as the program wrote
 /// them, and the few functions that check a number for C, lend a list
@@ -744,6 +788,14 @@ fn c_libraries(types: &Types, minimal: bool) -> (String, String) {
     }
     let mut c = String::from("/* The libraries of C that the program declares (docs/c.md). */\n");
     for library in &types.c_libraries {
+        if let Some(block) = &library.block {
+            // An `inline c` block is its own C, as the program wrote it.
+            // The two marks become `#line`s when the whole file is put
+            // together (`with_blocks_placed`), which is when the line
+            // each is on is known.
+            c += &format!("{}{}{}", block_mark(library.number, false), block.text, block_mark(library.number, true));
+            continue;
+        }
         c += &format!("/* {} */\n", library.words.join(" ").replace("*/", "* /"));
         for line in &library.lines {
             c += line;
@@ -5536,6 +5588,20 @@ impl Emitter<'_> {
             },
             ExprKind::Float(x) => Ok(Val::plain(format!("{x:?}"), Kind::Float)),
             ExprKind::Str(text) => Ok(Val::plain(c_string(text), Kind::Str).fixed()),
+            // A block of C is part of this file of C already (see
+            // `c_libraries`), and nothing while the program runs: its
+            // functions are called by their names (decision 61.5).
+            ExprKind::Inline { language, .. } => match self.types.c_libraries.iter().find(|library| library.span == span) {
+                Some(library) if language == "c" => Ok(Val::plain("0", Kind::CLibrary(library.number))),
+                _ => Err(Error::new(
+                    format!(
+                        "`zeno build` cannot take an `inline {language}` block: a built program is C, and has no {} beside it. \
+                         `zeno run` takes it",
+                        crate::inline::LANGUAGES.iter().find(|(word, _)| word == language).map_or("other language", |(_, name)| name)
+                    ),
+                    span,
+                )),
+            },
             ExprKind::Bool(b) => Ok(Val::plain(b.to_string(), Kind::Bool)),
             // What `none` is in C depends on where it is going, so it is
             // settled there. See `coerce`.
@@ -9515,7 +9581,7 @@ fn declared_in(statements: &[Stmt], names: &mut HashSet<String>) {
 fn declared_in_expr(expr: &Expr, names: &mut HashSet<String>) {
     let mut each = |expr: &Expr| declared_in_expr(expr, names);
     match &expr.kind {
-        ExprKind::Name(_) | ExprKind::Give(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+        ExprKind::Name(_) | ExprKind::Give(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
         ExprKind::Unit { value: inner, .. }
         | ExprKind::Unary { operand: inner, .. }
         | ExprKind::Field { object: inner, .. }
@@ -9572,7 +9638,7 @@ fn names_in_expr(expr: &Expr, inside: bool, names: &mut HashSet<String>) {
         ExprKind::Name(name) | ExprKind::Give(name) if inside => {
             names.insert(name.clone());
         }
-        ExprKind::Name(_) | ExprKind::Give(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+        ExprKind::Name(_) | ExprKind::Give(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
         ExprKind::Unit { value: inner, .. }
         | ExprKind::Unary { operand: inner, .. }
         | ExprKind::Field { object: inner, .. }
@@ -10360,6 +10426,68 @@ print(readings)
             assert!(finished, "{name}: {errors}");
             assert_eq!(printed, interpreted, "{name}");
         }
+    }
+
+    #[test]
+    fn a_block_of_c_is_part_of_the_c_of_every_build() {
+        if crate::bridge_c::helper().is_err() {
+            return;
+        }
+        let source = "import c\n\
+             \n\
+             let lib = inline c {\n    \
+                 #include <stdint.h>\n\n    \
+                 static const uint16_t STEP = 0xA001;\n\n    \
+                 uint16_t crc16(const uint8_t *data, size_t length) {\n        \
+                     uint16_t crc = 0xFFFF;\n        \
+                     for (size_t i = 0; i < length; i++) {\n            \
+                         crc ^= data[i];\n            \
+                         for (int b = 0; b < 8; b++) { crc = (crc & 1) ? (crc >> 1) ^ STEP : crc >> 1; }\n        \
+                     }\n        \
+                     return crc;\n    \
+                 }\n\n    \
+                 void scale(float *values, size_t count, float by) { for (size_t i = 0; i < count; i++) { values[i] *= by; } }\n    \
+                 const char *closing(void) { return \"}\"; }\n\
+             }\n\
+             \n\
+             function checksum(frame: list[u8]) -> int {\n    \
+                 let more = inline c {\n        int plus(int a, int b) { return a + b; }\n    }\n    \
+                 return more.plus(lib.crc16(frame, len(frame)), 1)\n\
+             }\n\
+             let frame: list[u8] = [0x01, 0x03, 0x00, 0x6B, 0x00, 0x03]\n\
+             let readings = [1.5, 2.0, 4.0]\n\
+             lib.scale(readings, len(readings), 2.0)\n\
+             print(checksum(frame), readings, lib.closing(), lib)\n";
+        let program = crate::modules::testing::program(source);
+        let (interpreted, result) = crate::vm::run_both(&program, source);
+        assert!(result.is_ok(), "zeno run failed: {result:?}");
+        assert_eq!(interpreted, "6005 [3.0, 4.0, 8.0] } <C library inline c>\n");
+        let builds = [("plain", Build::Ordinary, false, false), ("firmware", Build::Firmware, false, false), ("owned", Build::NoCollector, true, false)];
+        let minimal = MINIMAL_KINDS.iter().map(|(name, build, grows)| (*name, *build, *grows, true));
+        for (name, build, grows, minimal) in builds.into_iter().chain(minimal) {
+            let program = crate::modules::testing::built(source);
+            let (errors, types) = crate::checker::check_by(&program, build.rules());
+            assert!(errors.is_empty(), "{name}: {:?}", errors[0].message);
+            let c = emit_with(&program, &types, "test.zeno", build, Options { grows, minimal, ..Default::default() }).expect("it builds");
+            // The block is in the C as it was written, between a line
+            // that says where it was written and one that says where
+            // the C goes on, which is the line that one is on, plus one.
+            assert!(c.contains("#line 4 \"test.zeno\"\n#include <stdint.h>\n\nstatic const uint16_t STEP = 0xA001;\n"), "{name}: {c}");
+            assert!(c.contains("\n#line 23 \"test.zeno\"\nint plus(int a, int b) { return a + b; }\n#line "), "{name}");
+            for (at, line) in c.lines().enumerate() {
+                if let Some(rest) = line.strip_prefix("#line ").and_then(|rest| rest.strip_suffix(" \"test.c\"")) {
+                    assert_eq!(rest, (at + 2).to_string(), "{name}: the C goes on at its own line");
+                }
+            }
+            assert_eq!(c.matches("\"test.c\"").count(), 2, "{name}");
+            let Some((printed, errors, finished)) = build_and_run(&format!("block-{name}"), &c, &[]) else { return };
+            assert!(finished, "{name}: {errors}");
+            assert_eq!(printed, interpreted, "{name}");
+        }
+        // A program with no block has no `#line` in it.
+        let plain = crate::modules::testing::built("print(1)\n");
+        let (_, types) = crate::checker::check_by(&plain, Build::Ordinary.rules());
+        assert!(!emit(&plain, &types, "test.zeno", Build::Ordinary).expect("it builds").contains("#line"));
     }
 
     #[test]

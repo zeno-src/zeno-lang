@@ -499,6 +499,30 @@ pub(crate) struct Library {
     /// The lines given to C as they are: `#include`, `typedef`.
     pub(crate) lines: Vec<String>,
     pub(crate) functions: Vec<Function>,
+    /// The C itself, when the library is an `inline c` block of the
+    /// program and not something `c.library` names (decision 61).
+    pub(crate) block: Option<Block>,
+}
+
+/// An `inline c` block: its C as it was written, and where.
+#[derive(Debug, Clone)]
+pub(crate) struct Block {
+    pub(crate) text: String,
+    /// The file the block is in, as an error message shows it.
+    pub(crate) file: String,
+    /// The line of that file that the first line of `text` is.
+    pub(crate) line: usize,
+}
+
+impl Block {
+    /// The block for a C compiler, which is told where each line of it
+    /// was written, so that what it says of a line names the `.zeno`
+    /// file and the line there. `after` is the line of the C file that
+    /// comes after the block, and `c_file` that file.
+    pub(crate) fn c(&self, after: usize, c_file: &str) -> String {
+        let quoted = |name: &str| name.replace('\\', "/").replace('"', "");
+        format!("#line {} \"{}\"\n{}#line {} \"{}\"\n", self.line, quoted(&self.file), self.text, after, quoted(c_file))
+    }
 }
 
 /// One declared function, and what each of its types is to Zeno.
@@ -556,7 +580,211 @@ pub(crate) fn library_of(words: Vec<String>, declared: &str, number: usize, span
         functions.push(Function { name: function.name, value: function.value, c, gives: (function.gives, gives), takes });
     }
     let label = words.iter().find(|word| !word.starts_with('-')).cloned().unwrap_or_else(|| "c".to_string());
-    Ok(Library { number, span, label, words, lines, functions })
+    Ok(Library { number, span, label, words, lines, functions, block: None })
+}
+
+// ------------------------------------------------------ An inline block
+
+/// `text` with every `__attribute__((...))` and `__declspec(...)` taken
+/// out: they say how a function is built, and nothing of what it takes.
+fn without_attributes(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        let found = ["__attribute__", "__declspec"].iter().filter_map(|word| rest.find(word).map(|at| (at, word.len()))).min();
+        let Some((at, length)) = found else { break };
+        out.push_str(&rest[..at]);
+        rest = &rest[at + length..];
+        let trimmed = rest.trim_start();
+        if !trimmed.starts_with('(') {
+            continue;
+        }
+        let mut depth = 0;
+        let mut end = trimmed.len();
+        for (i, c) in trimmed.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(' ');
+        rest = &trimmed[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What an `inline c` block declares to Zeno: the lines `c.library`
+/// would be given for it (decision 61.4). Each function of the block
+/// that is not `static` is declared by its own first line; a line that
+/// starts with `#`, a `typedef`, a `struct`, a `union` and an `enum`
+/// are kept, since a function's types may be named there. A `static`
+/// function and a variable are the block's own, and are left out.
+///
+/// The block is C, and Zeno does not check it: this reads only as far
+/// as finding where each thing at the top of the file begins and ends.
+pub(crate) fn block_declarations(text: &str) -> std::result::Result<String, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut item = String::new();
+    let mut functions = 0;
+    let mut at = 0;
+    // Braces open in the thing being read: a struct, or what a variable
+    // starts as. A function's body is skipped whole.
+    let mut depth = 0;
+    let mut line_start = true;
+
+    // Where what begins at `from` ends: text in quotes, or a comment.
+    let skip = |from: usize| -> Option<usize> {
+        match (chars[from], chars.get(from + 1)) {
+            ('/', Some('/')) => Some(chars[from..].iter().position(|c| *c == '\n').map_or(chars.len(), |end| from + end)),
+            ('/', Some('*')) => {
+                let mut end = from + 2;
+                while end < chars.len() && !(chars[end] == '/' && chars[end - 1] == '*' && end > from + 2) {
+                    end += 1;
+                }
+                Some((end + 1).min(chars.len()))
+            }
+            (quote @ ('"' | '\''), _) => {
+                let mut end = from + 1;
+                while end < chars.len() && chars[end] != quote && chars[end] != '\n' {
+                    end += if chars[end] == '\\' { 2 } else { 1 };
+                }
+                Some((end + 1).min(chars.len()))
+            }
+            _ => None,
+        }
+    };
+
+    while at < chars.len() {
+        let c = chars[at];
+        // A line for the preprocessor, with the lines it goes on to.
+        if line_start && c == '#' {
+            let mut end = at;
+            while end < chars.len() && (chars[end] != '\n' || chars[end - 1] == '\\') {
+                end += 1;
+            }
+            if depth == 0 {
+                // A line that goes on to the next is made one line,
+                // which is how the declarations are read.
+                let line: String = chars[at..end].iter().collect();
+                let joined: Vec<&str> = line.split("\\\n").map(str::trim).collect();
+                out.push_str(joined.join(" ").trim_end());
+                out.push('\n');
+            }
+            at = end;
+            continue;
+        }
+        if let Some(end) = skip(at) {
+            // Text in quotes is kept where it is part of a thing, and a
+            // comment is one space.
+            if c == '/' {
+                item.push(' ');
+            } else {
+                item.extend(&chars[at..end]);
+            }
+            line_start = false;
+            at = end;
+            continue;
+        }
+        if c == '\n' {
+            line_start = true;
+            item.push(' ');
+            at += 1;
+            continue;
+        }
+        if !c.is_whitespace() {
+            line_start = false;
+        }
+        match c {
+            '{' if depth == 0 && is_function_head(&item) => {
+                // The body, to the `}` that closes it.
+                let mut open = 0;
+                while at < chars.len() {
+                    if let Some(end) = skip(at) {
+                        at = end;
+                        continue;
+                    }
+                    match chars[at] {
+                        '{' => open += 1,
+                        '}' => {
+                            open -= 1;
+                            if open == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    at += 1;
+                }
+                at += 1;
+                let head = without_attributes(item.trim());
+                item.clear();
+                if tokens(&head).iter().any(|word| word == "static") {
+                    continue;
+                }
+                let shown = head.split_whitespace().collect::<Vec<_>>().join(" ");
+                if let Err(why) = declaration(&shown) {
+                    return Err(format!("{why}. In an `inline c` block, a function that only the block calls is marked `static`, and Zeno leaves it alone"));
+                }
+                out.push_str(&shown);
+                out.push_str(";\n");
+                functions += 1;
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ';' if depth == 0 => {
+                let one = item.trim().to_string();
+                item.clear();
+                at += 1;
+                // A type is kept, for the functions that name it. A
+                // variable, and a function that is only declared, are
+                // the block's own.
+                if !one.is_empty() && is_a_type(&one) {
+                    out.push_str(&one.split_whitespace().collect::<Vec<_>>().join(" "));
+                    out.push_str(";\n");
+                }
+                continue;
+            }
+            _ => {}
+        }
+        item.push(c);
+        at += 1;
+    }
+    if functions == 0 {
+        return Err("this `inline c` block has no function that Zeno can call. A function is one when it is written out in the block, \
+                    with its body, and is not `static`: `int twice(int x) { return 2 * x; }`"
+            .to_string());
+    }
+    Ok(out)
+}
+
+/// Is what was read so far the first line of a function, whose body
+/// the `{` that follows begins: `uint16_t crc16(const uint8_t *data,
+/// size_t length)`? Not a struct, and not a variable with what it
+/// starts as.
+fn is_function_head(head: &str) -> bool {
+    let head = without_attributes(head);
+    let head = head.trim();
+    head.ends_with(')') && !head.contains('=') && !is_a_type(head) && head.contains('(')
+}
+
+/// The library an `inline c` block is: its functions, each with what it
+/// takes and gives, as `library_of` works them out for `c.library`.
+pub(crate) fn library_of_block(block: Block, number: usize, span: Span) -> std::result::Result<Library, String> {
+    let declared = block_declarations(&block.text)?;
+    let mut library = library_of(Vec::new(), &declared, number, span)?;
+    library.label = "inline c".to_string();
+    library.block = Some(block);
+    Ok(library)
 }
 
 // ----------------------------------------------------------- The stubs
@@ -619,19 +847,27 @@ fn argument(of: &Type, at: usize) -> String {
 }
 
 /// The library of C that Zeno writes for a `c.library`.
-fn stubs(lines: &[String], declared: &[Declared]) -> String {
+fn stubs(lines: &[String], declared: &[Declared], block: Option<&Block>) -> String {
     let named = typedefs(lines);
     let mut out = String::from(
         "/* Written by Zeno for c.library (docs/c.md). */\n\
          #include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n",
     );
-    for line in lines {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\n/* As the program declared them. */\n");
-    for function in declared {
-        out.push_str(&declared_c(function));
+    if let Some(block) = block {
+        // An `inline c` block is the library itself: its C comes first,
+        // as it was written, and declares what the stubs call.
+        out.push_str("\n/* The block, as the program wrote it. */\n");
+        let after = out.lines().count() + block.text.lines().count() + 3;
+        out.push_str(&block.c(after, "zeno-library.c"));
+    } else {
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("\n/* As the program declared them. */\n");
+        for function in declared {
+            out.push_str(&declared_c(function));
+        }
     }
     out.push_str(STUB_TOP);
     for (number, function) in declared.iter().enumerate() {
@@ -839,6 +1075,12 @@ pub(crate) fn plain(path: PathBuf) -> PathBuf {
     path
 }
 
+/// How the name of a file ends, among the words of a library: C, the
+/// assembly a C compiler takes (`.s`, and `.S`, which it reads as C
+/// reads a file first), and what either was built into. Any other word
+/// with no `/` in it is a library of the system.
+const FILE_ENDINGS: &[&str] = &[".c", ".s", ".so", ".a", ".o", ".dylib", ".dll", ".lib", ".obj"];
+
 fn parts(words: &[String], home: &Path, span: Span) -> Result<Vec<Part>> {
     let mut out = Vec::new();
     for word in words {
@@ -853,7 +1095,7 @@ fn parts(words: &[String], home: &Path, span: Span) -> Result<Vec<Part>> {
         let lower = word.to_ascii_lowercase();
         let is_file = word.contains('/')
             || word.contains('\\')
-            || [".c", ".so", ".a", ".o", ".dylib", ".dll", ".lib", ".obj"].iter().any(|end| lower.ends_with(end))
+            || FILE_ENDINGS.iter().any(|end| lower.ends_with(end))
             || lower.contains(".so.");
         if !is_file {
             out.push(Part::Named(word.to_string()));
@@ -888,7 +1130,7 @@ pub(crate) fn build_args(libraries: &[std::rc::Rc<Library>], home: &Path) -> std
             let lower = word.to_ascii_lowercase();
             let is_file = word.contains('/')
                 || word.contains('\\')
-                || [".c", ".so", ".a", ".o", ".dylib", ".dll", ".lib", ".obj"].iter().any(|end| lower.ends_with(end))
+                || FILE_ENDINGS.iter().any(|end| lower.ends_with(end))
                 || lower.contains(".so.");
             if !is_file {
                 args.push(format!("-l{word}"));
@@ -944,10 +1186,30 @@ pub fn library(library: &Value, declared: &Value, span: Span) -> Result {
         Ok(found) => found,
         Err(why) => return raise("ValueError", why, span),
     };
-    let home = crate::bridge::home().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-    let parts = parts(&words_given, &home, span)?;
     let label = words_given.first().cloned().unwrap_or_else(|| "c".to_string());
-    let source = stubs(&lines, &functions);
+    built(&words_given, &lines, &functions, None, &label, span)
+}
+
+/// An `inline c` block of the program, built and loaded as a library is
+/// (decision 61.5): its C is the library, and the stubs go in the same
+/// file of C.
+#[cold]
+#[inline(never)]
+pub fn block(block: &Block, span: Span) -> Result {
+    let found = block_declarations(&block.text).and_then(|declared| declarations(&declared));
+    let (lines, functions) = match found {
+        Ok(found) => found,
+        Err(why) => return raise("ValueError", why, span),
+    };
+    built(&[], &lines, &functions, Some(block), "inline c", span)
+}
+
+/// The stubs for these functions, built with the library they call, or
+/// taken from where an earlier run kept them, and loaded by the helper.
+fn built(words_given: &[String], lines: &[String], functions: &[Declared], block: Option<&Block>, label: &str, span: Span) -> Result {
+    let home = crate::bridge::home().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
+    let parts = parts(words_given, &home, span)?;
+    let source = stubs(lines, functions, block);
 
     let file = if cfg!(windows) { "zeno-library.dll" } else { "zeno-library.so" };
     let mut args: Vec<String> = Vec::new();
@@ -989,7 +1251,7 @@ pub fn library(library: &Value, declared: &Value, span: Span) -> Result {
         let name = format!("c-library-{:016x}", number_of(&all));
         let built = base.join(&name);
         if built.join(file).is_file() {
-            return crate::bridge::c_library(&built.join(file).to_string_lossy(), &label, span);
+            return crate::bridge::c_library(&built.join(file).to_string_lossy(), label, span);
         }
         let folder = making(&base, &name);
         if std::fs::create_dir_all(&folder).is_err() || std::fs::write(folder.join("zeno-library.c"), &source).is_err() {
@@ -1023,12 +1285,21 @@ pub fn library(library: &Value, declared: &Value, span: Span) -> Result {
             }
             Some(Ok(())) => {
                 let path = settle(&folder, &built, file);
-                return crate::bridge::c_library(&path.to_string_lossy(), &label, span);
+                return crate::bridge::c_library(&path.to_string_lossy(), label, span);
             }
             Some(Err(text)) => {
                 let _ = std::fs::remove_dir_all(&folder);
                 let names: Vec<&str> = functions.iter().map(|function| function.name.as_str()).collect();
-                return raise_build_error(&text, &folder, &label, &names, span);
+                if block.is_some() {
+                    // Each line the compiler names is a line of the
+                    // `.zeno` file already.
+                    return raise(
+                        "Error",
+                        format!("C could not build this `inline c` block. The C compiler said:\n{}", first_lines(text.trim(), 15)),
+                        span,
+                    );
+                }
+                return raise_build_error(&text, &folder, label, &names, span);
             }
         }
     }
@@ -1179,6 +1450,86 @@ mod tests {
             let error = declarations(wrong).expect_err(wrong);
             assert!(error.contains(says), "{wrong}: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn a_block_declares_the_functions_it_writes_out() {
+        let block = "#include <stdint.h>\n\
+             #define LIMIT 7\n\
+             #define TWICE(x) \\\n    ((x) * 2)\n\
+             typedef struct { int x; int y; } point;\n\
+             struct pair { int a; int b; };\n\
+             enum mode { OFF, ON = 4 };\n\
+             static const int table[3] = {1, 2, 3};\n\
+             int counter = 0;\n\
+             int declared_only(int x);\n\
+             /* A comment with a { in it. */\n\
+             static int helper(int x) { return x + '}'; }\n\
+             int px(const point *p)\n{\n    // }\n    return p ? p->x : table[1] + LIMIT;\n}\n\
+             const char *name(void) { return \"}{ \\\" block\"; }\n\
+             __attribute__((noinline)) double half(double x) { return x / 2; }\n\
+             struct pair *both(void) { static struct pair p; return &p; }\n";
+        assert_eq!(
+            block_declarations(block).unwrap(),
+            "#include <stdint.h>\n\
+             #define LIMIT 7\n\
+             #define TWICE(x) ((x) * 2)\n\
+             typedef struct { int x; int y; } point;\n\
+             struct pair { int a; int b; };\n\
+             enum mode { OFF, ON = 4 };\n\
+             int px(const point *p);\n\
+             const char *name(void);\n\
+             double half(double x);\n\
+             struct pair *both(void);\n"
+        );
+        let library = library_of_block(Block { text: block.to_string(), file: "a.zeno".to_string(), line: 3 }, 0, Span { line: 2, col: 9 }).unwrap();
+        let names: Vec<&str> = library.functions.iter().map(|function| function.name.as_str()).collect();
+        assert_eq!(names, ["px", "name", "half", "both"]);
+        assert_eq!(library.label, "inline c");
+        assert!(library.words.is_empty());
+    }
+
+    #[test]
+    fn a_block_with_nothing_to_call_and_one_zeno_cannot_call_are_refused() {
+        assert_eq!(
+            block_declarations("static int twice(int x) { return 2 * x; }\nint limit = 3;\n").unwrap_err(),
+            "this `inline c` block has no function that Zeno can call. A function is one when it is written out in the block, \
+             with its body, and is not `static`: `int twice(int x) { return 2 * x; }`"
+        );
+        let said = block_declarations("int say(const char *format, ...) { return 0; }\n").unwrap_err();
+        assert!(said.starts_with("`say` takes any number of arguments (`...`)"), "{said}");
+        assert!(said.ends_with("In an `inline c` block, a function that only the block calls is marked `static`, and Zeno leaves it alone"), "{said}");
+    }
+
+    #[test]
+    fn a_block_is_told_where_it_was_written() {
+        let block = Block { text: "int one(void) { return 1; }\n".to_string(), file: "src\\main.zeno".to_string(), line: 12 };
+        assert_eq!(block.c(40, "main.c"), "#line 12 \"src/main.zeno\"\nint one(void) { return 1; }\n#line 40 \"main.c\"\n");
+    }
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_of_assembly_is_a_file_and_not_a_library_of_the_system() {
+        let folder = std::env::temp_dir().join(format!("zeno-assembly-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["start.s", "vectors.S"] {
+            std::fs::write(folder.join(name), "").unwrap();
+        }
+        let words = ["start.s".to_string(), "vectors.S".to_string(), "m".to_string()];
+        let parts = parts(&words, &folder, Span { line: 1, col: 1 }).unwrap_or_else(|_| panic!("the files are there"));
+        assert!(matches!(&parts[0], Part::File(path) if path.ends_with("start.s")));
+        assert!(matches!(&parts[1], Part::File(path) if path.ends_with("vectors.S")));
+        assert!(matches!(&parts[2], Part::Named(name) if name == "m"));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
 

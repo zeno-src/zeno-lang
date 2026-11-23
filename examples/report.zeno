@@ -1,0 +1,32 @@
+# One file, three languages. Python works out the statistics, with the
+# library it comes with; JavaScript writes the numbers as a country
+# writes them, which Node knows for every country; and Zeno is the
+# program (docs/inline.md).
+#
+#     zeno run examples/report.zeno
+import python
+import node
+
+let stats = inline python {
+    import statistics
+
+    def summary(readings):
+        """The middle, the mean and the spread of some readings."""
+        return [statistics.median(readings), statistics.fmean(readings), statistics.pstdev(readings)]
+}
+
+let written = inline node {
+    // A number as it is written in a place: "en-IN" groups by lakhs.
+    exports.number = (value, place) => new Intl.NumberFormat(place, { maximumFractionDigits: 1 }).format(value)
+}
+
+let readings = [1234567.5, 1200000.0, 1310450.25, 1189900.0, 1275000.75]
+let summary = python.copy(stats.summary(readings))
+let names = ["median", "mean", "spread"]
+
+for place in ["en-IN", "en-US", "de-DE"] {
+    print(place)
+    for at in range(len(names)) {
+        print(f"  {names[at]:<8}{written.number(summary[at], place)}")
+    }
+}

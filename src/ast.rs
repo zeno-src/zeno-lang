@@ -845,7 +845,7 @@ fn fresh_expr(expr: &mut Expr, visit: &mut dyn FnMut(Node)) {
         ExprKind::Take(place) => fresh_expr(place, visit),
         ExprKind::Int(_)
         | ExprKind::Float(_)
-        | ExprKind::Str(_)
+        | ExprKind::Str(_) | ExprKind::Inline { .. }
         | ExprKind::Bool(_)
         | ExprKind::None
         | ExprKind::Name(_)
@@ -1000,6 +1000,10 @@ pub enum ExprKind {
     /// function that gives that many, or on the right of a `Receive`
     /// (decision 57). They are never a value of their own.
     Several(Vec<Expr>),
+    /// `inline c { ... }`: code of another language, as it was written,
+    /// which gives a library of C or a module of Python or JavaScript
+    /// (decision 61). Only a `let` has one as its value.
+    Inline { language: String, text: String },
 }
 
 /// One piece of an f-string.

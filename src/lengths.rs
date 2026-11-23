@@ -255,7 +255,7 @@ impl Reader<'_> {
             }
             // A function written inside sees the list too.
             ExprKind::Function(function) => self.block(&function.body),
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
         }
     }
 }

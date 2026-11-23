@@ -39,6 +39,7 @@ mod emit_llvm;
 mod error;
 mod format;
 mod html;
+mod inline;
 mod interpreter;
 mod json;
 mod ints;

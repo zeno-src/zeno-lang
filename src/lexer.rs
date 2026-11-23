@@ -220,8 +220,130 @@ impl Lexer {
                 break;
             }
         }
+        if text == "inline" && self.inline_block(span) {
+            return;
+        }
         let kind = keyword(&text).unwrap_or(TokenKind::Ident(text));
         self.push(kind, span);
+    }
+
+    /// `inline c {` at the end of a line begins a block of another
+    /// language (decision 61). `inline` is not a word of Zeno: it is a
+    /// name like any other, unless a name and a `{` that ends the line
+    /// come after it, which nothing else in Zeno can be. This is the one
+    /// place where the lexer looks further ahead than two characters,
+    /// and it never looks past the end of the line.
+    ///
+    /// What follows is not Zeno, and is not read as Zeno: every line is
+    /// taken as it is, up to a line that holds only `}`, as far in as
+    /// the line that opened the block. The lines between are further in
+    /// than that, so no `}` of the other language can be taken for the
+    /// end, whatever its strings and comments look like.
+    fn inline_block(&mut self, span: Span) -> bool {
+        // Is it `inline name {` and then the end of the line?
+        let blank = |c: char| c == ' ' || c == '\t';
+        let mut at = self.pos;
+        while self.chars.get(at).copied().is_some_and(blank) {
+            at += 1;
+        }
+        let name_from = at;
+        while self.chars.get(at).is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+            at += 1;
+        }
+        if at == name_from || self.chars[name_from].is_ascii_digit() {
+            return false;
+        }
+        let language: String = self.chars[name_from..at].iter().collect();
+        while self.chars.get(at).copied().is_some_and(blank) {
+            at += 1;
+        }
+        if self.chars.get(at) != Some(&'{') {
+            return false;
+        }
+        at += 1;
+        while self.chars.get(at).is_some_and(|c| blank(*c) || *c == '\r') {
+            at += 1;
+        }
+        if !matches!(self.chars.get(at), None | Some('\n')) {
+            return false;
+        }
+
+        // How far in the line that opens the block is.
+        let mut line_from = self.started;
+        while line_from > 0 && self.chars[line_from - 1] != '\n' {
+            line_from -= 1;
+        }
+        let indent: String = self.chars[line_from..].iter().take_while(|c| blank(**c)).collect();
+
+        // The rest of the opening line.
+        while self.pos < at {
+            self.advance();
+        }
+        self.advance(); // its line break, if the file goes on
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut closed = false;
+        let mut said = false;
+        while self.pos < self.chars.len() {
+            let here = Span { line: self.line, col: self.col };
+            let mut end = self.pos;
+            while end < self.chars.len() && self.chars[end] != '\n' {
+                end += 1;
+            }
+            let line: String = self.chars[self.pos..end].iter().collect();
+            let line = line.trim_end();
+            if line.strip_prefix(indent.as_str()) == Some("}") {
+                // The `}` itself is read, and what is left of its line
+                // is Zeno again.
+                for _ in 0..indent.chars().count() + 1 {
+                    self.advance();
+                }
+                closed = true;
+                break;
+            }
+            let further = line.strip_prefix(indent.as_str()).is_some_and(|rest| rest.starts_with(blank));
+            if !line.is_empty() && !further && !said {
+                said = true;
+                self.error(
+                    format!(
+                        "this line of the `inline {language}` block is not further in than the line that opens the block. \
+                         Everything in the block is indented, and the block ends at a line that holds only `}}`, \
+                         as far in as the line that opened it"
+                    ),
+                    Span { line: here.line, col: line.chars().take_while(|c| blank(*c)).count() + 1 },
+                );
+            }
+            lines.push(line.to_string());
+            while self.pos < end {
+                self.advance();
+            }
+            self.advance(); // the line break
+        }
+        if !closed && !said {
+            self.error(
+                format!(
+                    "this `inline {language}` block has no end. It ends at a line that holds only `}}`, \
+                     as far in as the line that opened it"
+                ),
+                span,
+            );
+        }
+
+        // The indentation every line of the block shares is not part of
+        // what the block says.
+        let shared = lines
+            .iter()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.chars().take_while(|c| blank(*c)).collect::<String>())
+            .reduce(|shared, own| shared.chars().zip(own.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect())
+            .unwrap_or_default();
+        let mut text = String::new();
+        for line in &lines {
+            text.push_str(line.strip_prefix(shared.as_str()).unwrap_or(line));
+            text.push('\n');
+        }
+        self.push(TokenKind::Inline { language, text }, span);
+        true
     }
 
     /// A number: `42`, `1_000`, `3.14`, `1e-3`, `0xFF`, `0b1010`, `0o17`.
@@ -690,6 +812,69 @@ mod tests {
     #[test]
     fn all_reported_errors_not_just_the_first() {
         assert_eq!(errors("$\n@\n`").len(), 3);
+    }
+
+    #[test]
+    fn an_inline_block_is_taken_as_it_was_written() {
+        // Everything between the first line and the `}` under it is
+        // one token: the text, with the indentation its lines share
+        // taken off, and nothing in it read as Zeno.
+        let source = "let lib = inline c {\n    int f(void) {\n        return '}' + \"}\"[0]; // }\n    }\n\n    # not a comment of Zeno\n}\nprint(1)\n";
+        let tokens = kinds(source);
+        assert_eq!(
+            tokens[..5],
+            [
+                TokenKind::Let,
+                ident("lib"),
+                TokenKind::Assign,
+                TokenKind::Inline {
+                    language: "c".to_string(),
+                    text: "int f(void) {\n    return '}' + \"}\"[0]; // }\n}\n\n# not a comment of Zeno\n".to_string()
+                },
+                TokenKind::Newline,
+            ]
+        );
+        assert_eq!(tokens[5], ident("print"));
+        // The lines after it are counted as they are in the file.
+        let all = lex(source).unwrap();
+        assert_eq!((all[5].span.line, all[5].span.col), (8, 1));
+        // A block further in ends at a `}` as far in as its own line.
+        let nested = "function f() {\n    let m = inline python {\n        def g():\n            return {\n            }\n    }\n}\n";
+        assert!(kinds(nested).contains(&TokenKind::Inline { language: "python".to_string(), text: "def g():\n    return {\n    }\n".to_string() }));
+        // An empty block is a block.
+        assert!(kinds("let m = inline c {\n}\n").contains(&TokenKind::Inline { language: "c".to_string(), text: String::new() }));
+    }
+
+    #[test]
+    fn inline_is_a_name_wherever_it_does_not_open_a_block() {
+        // `inline` is not a word of Zeno. It begins a block only with a
+        // name and a `{` that ends the line after it, which nothing
+        // else can be.
+        assert_eq!(kinds("let inline = 3")[1], ident("inline"));
+        assert_eq!(kinds("inline(c)")[0], ident("inline"));
+        assert_eq!(kinds("if inline {\n}")[1], ident("inline"));
+        assert_eq!(kinds("inline c { }")[0], ident("inline"));
+        assert_eq!(kinds("for inline in c {\n}")[1], ident("inline"));
+    }
+
+    #[test]
+    fn an_inline_block_that_does_not_end_says_how_one_ends() {
+        let said = errors("let m = inline c {\n    int f(void);\n");
+        assert_eq!(said.len(), 1);
+        assert_eq!(
+            said[0],
+            (
+                "this `inline c` block has no end. It ends at a line that holds only `}`, as far in as the line that opened it".to_string(),
+                1,
+                9
+            )
+        );
+        // A line that is not further in than the first is where the
+        // mistake is: a `}` in the wrong place, most often.
+        let said = errors("function f() {\n    let m = inline c {\n        int f(void);\n  }\n}\n");
+        assert_eq!(said.len(), 1);
+        assert!(said[0].0.starts_with("this line of the `inline c` block is not further in than the line that opens the block."), "{said:?}");
+        assert_eq!((said[0].1, said[0].2), (4, 3));
     }
 
     #[test]

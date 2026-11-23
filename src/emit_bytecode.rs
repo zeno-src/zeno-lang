@@ -1223,6 +1223,15 @@ impl Compiler {
             },
             ExprKind::Float(x) => self.constant(Value::Float(*x), span),
             ExprKind::Str(text) => self.constant(Value::str(text), span),
+            // A block of another language is a call of the function
+            // that starts it, with the block's language and its text
+            // (decision 61).
+            ExprKind::Inline { language, text } => {
+                self.constant(crate::builtins::inline_block(), span);
+                self.constant(Value::str(language), span);
+                self.constant(Value::str(text), span);
+                self.emit(Op::Call(2), span);
+            }
             ExprKind::Bool(b) => self.constant(Value::Bool(*b), span),
             ExprKind::None => self.constant(Value::None, span),
 
@@ -1552,7 +1561,7 @@ impl Names {
 
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Inline { .. } | ExprKind::Bool(_) | ExprKind::None => {}
             ExprKind::Name(name) | ExprKind::Give(name) => self.add(name),
             ExprKind::FormatStr(parts) => {
                 for part in parts {

@@ -381,7 +381,18 @@ impl Parser {
             return Ok(StmtKind::Receive { declare: Some(keyword == TokenKind::Var), places, value });
         }
         self.expect(TokenKind::Assign)?;
-        let value = self.expression()?;
+        // `let bits = inline c {`: a block of another language is the
+        // whole value of a `let`, and nothing else (decision 61.3).
+        let value = if let TokenKind::Inline { language, text } = self.peek().clone() {
+            let span = self.span();
+            if keyword != TokenKind::Let {
+                return self.error("an `inline` block is the value of a `let`. What it gives never changes");
+            }
+            self.advance();
+            Expr { kind: ExprKind::Inline { language, text }, span }
+        } else {
+            self.expression()?
+        };
 
         Ok(match keyword {
             TokenKind::Const => StmtKind::Const { name, ty, value },
@@ -1530,6 +1541,12 @@ impl Parser {
                 self.advance();
                 ExprKind::FormatStr(format_parts(&value, span)?)
             }
+            TokenKind::Inline { language, .. } => {
+                return self.error(format!(
+                    "an `inline` block is the whole value of a `let`, as in `let name = inline {language} {{`. \
+                     What it has is then used through that name"
+                ));
+            }
             TokenKind::True => {
                 self.advance();
                 ExprKind::Bool(true)
@@ -1909,6 +1926,27 @@ mod tests {
     }
 
     // ----- Statements -----
+
+    #[test]
+    fn an_inline_block_is_the_value_of_a_let() {
+        assert_eq!(
+            tree("let lib = inline c {\n    int one(void) { return 1; }\n}\nprint(lib.one())"),
+            "let lib = (inline c \"int one(void) { return 1; }\\n\")\nprint(lib.one())\n"
+        );
+        // Nowhere else: what a block has is used through a name.
+        assert_eq!(
+            error("print(inline c {\n    int one(void) { return 1; }\n}\n)"),
+            "an `inline` block is the whole value of a `let`, as in `let name = inline c {`. What it has is then used through that name"
+        );
+        assert_eq!(
+            error("var lib = inline c {\n    int one(void) { return 1; }\n}"),
+            "an `inline` block is the value of a `let`. What it gives never changes"
+        );
+        assert_eq!(
+            error("const LIB = inline c {\n    int one(void) { return 1; }\n}"),
+            "an `inline` block is the value of a `let`. What it gives never changes"
+        );
+    }
 
     #[test]
     fn declarations_and_assignment() {

@@ -358,6 +358,19 @@ fn csharp_assembly(_: &mut dyn Machine, args: Vec<Value>, span: Span) -> Result 
     Ok(Value::None)
 }
 
+/// What an `inline` block is to the VM: a function called with the
+/// block's language and its text, where the block is written (decision
+/// 61). No program can name it.
+pub fn inline_block() -> Value {
+    fn start(_: &mut dyn Machine, args: Vec<Value>, span: Span) -> Result {
+        match (&args[0], &args[1]) {
+            (Value::Str(language), Value::Str(text)) => crate::inline::run(language, text, span),
+            _ => fatal("an `inline` block is a language and its text", span),
+        }
+    }
+    Value::Builtin(Builtin { name: "inline", call: start })
+}
+
 /// `c.library(library, declarations)`: a library of C, and the
 /// functions of it that the declarations name (decision 44).
 fn c_library(_: &mut dyn Machine, args: Vec<Value>, span: Span) -> Result {

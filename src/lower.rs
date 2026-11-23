@@ -1396,6 +1396,21 @@ impl Lowerer {
             },
             ExprKind::Float(x) => Expr::Float(*x),
             ExprKind::Str(text) => Expr::Str(text.clone()),
+            // A block of another language is run by that language,
+            // beside `zeno run`, or is C in a build that writes C. A
+            // program written out in another language has neither
+            // (decision 61.7).
+            ExprKind::Inline { language, .. } => {
+                return Err(Error::new(
+                    format!(
+                        "`--target` cannot take an `inline {language}` block: the program it writes is in one other language, \
+                         and the block is in {}. `zeno run` takes it{}",
+                        crate::inline::LANGUAGES.iter().find(|(word, _)| word == language).map_or("another", |(_, name)| name),
+                        if language == "c" { ", and so does a `zeno build` that writes C" } else { "" }
+                    ),
+                    expr.span,
+                ));
+            }
             ExprKind::Bool(b) => Expr::Bool(*b),
             ExprKind::None => Expr::None,
             ExprKind::FormatStr(parts) => {
