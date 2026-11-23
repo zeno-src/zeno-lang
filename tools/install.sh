@@ -32,7 +32,7 @@ set -eu
 
 # The version this script installs. It is the version in Cargo.toml:
 # tools/release-check.sh refuses a release in which the two differ.
-version=0.8.0
+version=0.9.0
 
 version=${ZENO_VERSION:-$version}
 home=${ZENO_HOME:-$HOME/.zeno}

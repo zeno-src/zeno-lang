@@ -1,6 +1,6 @@
 [package]
 name = "zeno"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Zeno: a small, readable, statically typed language that compiles to C"
 license = "MIT"
